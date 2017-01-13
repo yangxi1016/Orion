@@ -1,0 +1,361 @@
+#!/bin/bash
+#############################################################################
+#  Copyright (C) 2013-2015 Lawrence Livermore National Security, LLC.
+#  Produced at Lawrence Livermore National Laboratory (cf, DISCLAIMER).
+#  Written by Albert Chu <chu11@llnl.gov>
+#  LLNL-CODE-644248
+#  
+#  This file is part of Magpie, scripts for running Hadoop on
+#  traditional HPC systems.  For details, see <URL>.
+#  
+#  Magpie is free software; you can redistribute it and/or modify it
+#  under the terms of the GNU General Public License as published by
+#  the Free Software Foundation; either version 2 of the License, or
+#  (at your option) any later version.
+#  
+#  Magpie is distributed in the hope that it will be useful, but
+#  WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+#  General Public License for more details.
+#  
+#  You should have received a copy of the GNU General Public License
+#  along with Magpie.  If not, see <http://www.gnu.org/licenses/>.
+#############################################################################
+
+# This script sets up configuration files for jobs.  For the most
+# part, it shouldn't be editted.  See job submission files for
+# configuration details.
+
+source ${MAGPIE_SCRIPTS_HOME}/magpie-submission-convert
+source ${MAGPIE_SCRIPTS_HOME}/magpie-common-exports
+source ${MAGPIE_SCRIPTS_HOME}/magpie-common-functions
+source ${MAGPIE_SCRIPTS_HOME}/magpie-variable-conversion
+
+#
+# Setup a whole bunch of environment variables and directories
+# 
+
+# Create conf & log dirs node specific
+Magpie_make_all_local_dirs_node_specific
+
+mkdir -p $MAGPIE_LOCAL_CONF_DIR
+if [ $? -ne 0 ] ; then
+    echo "mkdir failed making ${MAGPIE_LOCAL_CONF_DIR}"
+    exit 1
+fi
+
+mkdir -p $MAGPIE_LOCAL_SCRATCH_DIR
+if [ $? -ne 0 ] ; then
+    echo "mkdir failed making ${MAGPIE_LOCAL_SCRATCH_DIR}"
+    exit 1
+fi
+
+#
+# Setup Hadoop directories
+#
+
+if [ "${HADOOP_SETUP}" == "yes" ]
+then  
+    mkdir -p $HADOOP_CONF_DIR
+    if [ $? -ne 0 ] ; then
+	echo "mkdir failed making ${HADOOP_CONF_DIR}"
+	exit 1
+    fi
+
+    mkdir -p $HADOOP_LOG_DIR
+    if [ $? -ne 0 ] ; then
+	echo "mkdir failed making ${HADOOP_LOG_DIR}"
+	exit 1
+    fi
+
+    mkdir -p $HADOOP_LOCAL_SCRATCH_DIR
+    if [ $? -ne 0 ] ; then
+	echo "mkdir failed making ${HADOOP_LOCAL_SCRATCH_DIR}"
+	exit 1
+    fi
+fi
+
+#
+# Setup Pig directories
+#
+
+if [ "${PIG_SETUP}" == "yes" ]
+then
+    mkdir -p $PIG_CONF_DIR
+    if [ $? -ne 0 ] ; then
+	echo "mkdir failed making ${PIG_CONF_DIR}"
+	exit 1
+    fi
+
+    mkdir -p $PIG_LOCAL_SCRATCH_DIR
+    if [ $? -ne 0 ] ; then
+	echo "mkdir failed making ${PIG_LOCAL_SCRATCH_DIR}"
+	exit 1
+    fi
+fi
+
+#
+# Setup Hbase directories
+#
+
+if [ "${HBASE_SETUP}" == "yes" ]
+then
+    mkdir -p $HBASE_CONF_DIR
+    if [ $? -ne 0 ] ; then
+	echo "mkdir failed making ${HBASE_CONF_DIR}"
+	exit 1
+    fi
+
+    mkdir -p $HBASE_LOG_DIR
+    if [ $? -ne 0 ] ; then
+	echo "mkdir failed making ${HBASE_LOG_DIR}"
+	exit 1
+    fi
+
+    mkdir -p $HBASE_LOCAL_SCRATCH_DIR
+    if [ $? -ne 0 ] ; then
+	echo "mkdir failed making ${HBASE_LOCAL_SCRATCH_DIR}"
+	exit 1
+    fi
+fi
+
+#
+# Setup Phoenix directories
+#
+
+if [ "${PHOENIX_SETUP}" == "yes" ]
+then
+    mkdir -p $PHOENIX_CONF_DIR
+    if [ $? -ne 0 ] ; then
+	echo "mkdir failed making ${PHOENIX_CONF_DIR}"
+	exit 1
+    fi
+
+    mkdir -p $PHOENIX_LOG_DIR
+    if [ $? -ne 0 ] ; then
+	echo "mkdir failed making ${PHOENIX_LOG_DIR}"
+	exit 1
+    fi
+fi
+
+#
+# Setup Spark directories
+#
+
+if [ "${SPARK_SETUP}" == "yes" ]
+then
+    mkdir -p $SPARK_CONF_DIR
+    if [ $? -ne 0 ] ; then
+	echo "mkdir failed making ${SPARK_CONF_DIR}"
+	exit 1
+    fi
+
+    mkdir -p $SPARK_LOG_DIR
+    if [ $? -ne 0 ] ; then
+	echo "mkdir failed making ${SPARK_LOG_DIR}"
+	exit 1
+    fi
+
+    mkdir -p $SPARK_LOCAL_SCRATCH_DIR
+    if [ $? -ne 0 ] ; then
+	echo "mkdir failed making ${SPARK_LOCAL_SCRATCH_DIR}"
+	exit 1
+    fi
+fi
+
+#
+# Setup Storm directories
+#
+
+if [ "${STORM_SETUP}" == "yes" ]
+then
+    mkdir -p $STORM_CONF_DIR
+    if [ $? -ne 0 ] ; then
+	echo "mkdir failed making ${STORM_CONF_DIR}"
+	exit 1
+    fi
+
+    mkdir -p $STORM_LOG_DIR
+    if [ $? -ne 0 ] ; then
+	echo "mkdir failed making ${STORM_LOG_DIR}"
+	exit 1
+    fi
+
+    mkdir -p $STORM_LOCAL_SCRATCH_DIR
+    if [ $? -ne 0 ] ; then
+	echo "mkdir failed making ${STORM_LOCAL_SCRATCH_DIR}"
+	exit 1
+    fi
+fi
+
+#
+# Setup Tachyon directories
+#
+
+if [ "${TACHYON_SETUP}" == "yes" ]
+then
+    mkdir -p $TACHYON_CONF_DIR
+    if [ $? -ne 0 ] ; then
+	echo "mkdir failed making ${TACHYON_CONF_DIR}"
+	exit 1
+    fi
+
+    mkdir -p $TACHYON_LOG_DIR
+    if [ $? -ne 0 ] ; then
+	echo "mkdir failed making ${TACHYON_LOG_DIR}"
+	exit 1
+    fi
+
+    mkdir -p $TACHYON_LOCAL_SCRATCH_DIR
+    if [ $? -ne 0 ] ; then
+	echo "mkdir failed making ${TACHYON_LOCAL_SCRATCH_DIR}"
+	exit 1
+    fi
+fi
+
+#
+# Setup Zookeeper directories
+#
+
+if [ "${ZOOKEEPER_SETUP}" == "yes" ]
+then
+    mkdir -p $ZOOKEEPER_CONF_DIR
+    if [ $? -ne 0 ] ; then
+	echo "mkdir failed making ${ZOOKEEPER_CONF_DIR}"
+	exit 1
+    fi
+
+    mkdir -p $ZOOKEEPER_LOG_DIR
+    if [ $? -ne 0 ] ; then
+	echo "mkdir failed making ${ZOOKEEPER_LOG_DIR}"
+	exit 1
+    fi
+
+    mkdir -p $ZOOKEEPER_LOCAL_SCRATCH_DIR
+    if [ $? -ne 0 ] ; then
+	echo "mkdir failed making ${ZOOKEEPER_LOCAL_SCRATCH_DIR}"
+	exit 1
+    fi
+fi
+
+#
+# Setup/Calculate Core Master/Slave files
+#
+
+hash hostlist 2>/dev/null
+if [ $? -eq 0 ]
+then
+    hostrangescript="hostlist"
+    hostrangescriptoptions="-e -d \n"
+else
+    if [ -x ${MAGPIE_SCRIPTS_HOME}/bin/magpie-expand-nodes ]
+    then
+	hostrangescript="${MAGPIE_SCRIPTS_HOME}/bin/magpie-expand-nodes"
+	hostrangescriptoptions=""
+    else
+	echo "Cannot find tool to expand host ranges"
+	exit 1
+    fi
+fi
+
+${hostrangescript} ${hostrangescriptoptions} ${MAGPIE_NODELIST} | head -1 > ${MAGPIE_LOCAL_CONF_DIR}/tmp_masters
+${hostrangescript} ${hostrangescriptoptions} ${MAGPIE_NODELIST} | tail -n+2 > ${MAGPIE_LOCAL_CONF_DIR}/tmp_slaves
+
+if [ "${HADOOP_SETUP}" == "yes" ] \
+    && ([ "${HADOOP_FILESYSTEM_MODE}" == "hdfs" ] \
+    || [ "${HADOOP_FILESYSTEM_MODE}" == "hdfsoverlustre" ] \
+    || [ "${HADOOP_FILESYSTEM_MODE}" == "hdfsovernetworkfs" ]) \
+    && [ "${HDFS_FEDERATION_NAMENODE_COUNT}" -gt 1 ]
+then
+    extranamenodecount=`expr ${HDFS_FEDERATION_NAMENODE_COUNT} - 1`
+
+    head -${extranamenodecount} ${MAGPIE_LOCAL_CONF_DIR}/tmp_slaves > ${MAGPIE_LOCAL_CONF_DIR}/namenode_hdfs_federation
+
+    tail -n+${HDFS_FEDERATION_NAMENODE_COUNT} ${MAGPIE_LOCAL_CONF_DIR}/tmp_slaves > ${MAGPIE_LOCAL_CONF_DIR}/tmp_slaves_tmp
+
+    cp -fr ${MAGPIE_LOCAL_CONF_DIR}/tmp_slaves_tmp ${MAGPIE_LOCAL_CONF_DIR}/tmp_slaves
+fi
+
+if [ "${ZOOKEEPER_SETUP}" == "yes" ]
+then
+    tmpslavecount=`cat ${MAGPIE_LOCAL_CONF_DIR}/tmp_slaves | wc -l`
+    jobslavecount=`expr ${tmpslavecount} - ${ZOOKEEPER_REPLICATION_COUNT}`
+    zookeeperslavestart=`expr ${jobslavecount} + 1`
+
+    cp -fr ${MAGPIE_LOCAL_CONF_DIR}/tmp_masters ${MAGPIE_LOCAL_CONF_DIR}/job_masters
+
+    if [ "${ZOOKEEPER_SHARE_NODES}" != "yes" ] 
+    then
+	head -${jobslavecount} ${MAGPIE_LOCAL_CONF_DIR}/tmp_slaves > ${MAGPIE_LOCAL_CONF_DIR}/job_slaves
+    else
+	cp -fr ${MAGPIE_LOCAL_CONF_DIR}/tmp_slaves ${MAGPIE_LOCAL_CONF_DIR}/job_slaves
+    fi
+
+    tail -n+${zookeeperslavestart} ${MAGPIE_LOCAL_CONF_DIR}/tmp_slaves > ${ZOOKEEPER_CONF_DIR}/zookeeper_slaves 
+
+    # The Zookeeper master is not a real Zookeeper node
+    cp -fr ${MAGPIE_LOCAL_CONF_DIR}/job_masters ${ZOOKEEPER_CONF_DIR}/zookeeper_master
+else
+    cp -fr ${MAGPIE_LOCAL_CONF_DIR}/tmp_masters ${MAGPIE_LOCAL_CONF_DIR}/job_masters
+    cp -fr ${MAGPIE_LOCAL_CONF_DIR}/tmp_slaves ${MAGPIE_LOCAL_CONF_DIR}/job_slaves
+fi
+
+if [ "${HADOOP_SETUP}" == "yes" ]
+then
+    cp -fr ${MAGPIE_LOCAL_CONF_DIR}/job_masters ${HADOOP_CONF_DIR}/masters
+    cp -fr ${MAGPIE_LOCAL_CONF_DIR}/job_slaves ${HADOOP_CONF_DIR}/slaves
+    if [ -f "${MAGPIE_LOCAL_CONF_DIR}/namenode_hdfs_federation" ]
+    then
+	cp -fr ${MAGPIE_LOCAL_CONF_DIR}/namenode_hdfs_federation ${HADOOP_CONF_DIR}/namenode_hdfs_federation
+    fi
+
+    slavenodes=`cat ${HADOOP_CONF_DIR}/slaves`
+    `touch ${HADOOP_CONF_DIR}/slaves_fqdn`
+    dnsdomainname=`dnsdomainname`
+
+    # We assume FQDN across all nodes is the same
+    for node in ${slavenodes}
+    do
+	echo "${node}.${dnsdomainname}" >> ${HADOOP_CONF_DIR}/slaves_fqdn
+    done
+fi
+
+if [ "${HBASE_SETUP}" == "yes" ]
+then
+    cp -fr ${MAGPIE_LOCAL_CONF_DIR}/job_masters ${HBASE_CONF_DIR}/masters
+    cp -fr ${MAGPIE_LOCAL_CONF_DIR}/job_slaves ${HBASE_CONF_DIR}/regionservers
+fi
+
+if [ "${PHOENIX_SETUP}" == "yes" ]
+then
+    cp -fr ${MAGPIE_LOCAL_CONF_DIR}/job_slaves ${PHOENIX_CONF_DIR}/regionservers
+fi
+
+if [ "${SPARK_SETUP}" == "yes" ]
+then
+    cp -fr ${MAGPIE_LOCAL_CONF_DIR}/job_masters ${SPARK_CONF_DIR}/masters
+    cp -fr ${MAGPIE_LOCAL_CONF_DIR}/job_slaves ${SPARK_CONF_DIR}/slaves
+fi
+
+if [ "${STORM_SETUP}" == "yes" ]
+then
+    cp -fr ${MAGPIE_LOCAL_CONF_DIR}/job_masters ${STORM_CONF_DIR}/masters
+    cp -fr ${MAGPIE_LOCAL_CONF_DIR}/job_slaves ${STORM_CONF_DIR}/workers
+fi
+
+if [ "${TACHYON_SETUP}" == "yes" ]
+then
+    # Tachyon assumes setup node is master, so no need for masters
+    # file but we still output it b/c there are functions in Magpie
+    # that assume it exists 
+    cp -fr ${MAGPIE_LOCAL_CONF_DIR}/job_masters ${TACHYON_CONF_DIR}/masters
+    if [ "${TACHYON_WORKER_ON_MASTER}" == "yes" ]
+    then
+	cp -fr ${MAGPIE_LOCAL_CONF_DIR}/job_masters ${TACHYON_CONF_DIR}/workers
+	cat ${MAGPIE_LOCAL_CONF_DIR}/job_slaves >> ${TACHYON_CONF_DIR}/workers
+    else
+	cp -fr ${MAGPIE_LOCAL_CONF_DIR}/job_slaves ${TACHYON_CONF_DIR}/workers
+    fi
+fi
+
+exit 0

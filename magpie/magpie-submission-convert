@@ -1,0 +1,104 @@
+#!/bin/bash
+#############################################################################
+#  Copyright (C) 2013-2015 Lawrence Livermore National Security, LLC.
+#  Produced at Lawrence Livermore National Laboratory (cf, DISCLAIMER).
+#  Written by Albert Chu <chu11@llnl.gov>
+#  LLNL-CODE-644248
+#  
+#  This file is part of Magpie, scripts for running Hadoop on
+#  traditional HPC systems.  For details, see <URL>.
+#  
+#  Magpie is free software; you can redistribute it and/or modify it
+#  under the terms of the GNU General Public License as published by
+#  the Free Software Foundation; either version 2 of the License, or
+#  (at your option) any later version.
+#  
+#  Magpie is distributed in the hope that it will be useful, but
+#  WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+#  General Public License for more details.
+#  
+#  You should have received a copy of the GNU General Public License
+#  along with Magpie.  If not, see <http://www.gnu.org/licenses/>.
+#############################################################################
+
+source ${MAGPIE_SCRIPTS_HOME}/magpie-helper-functions
+
+Magpie_calc_slurm_magpie_timelimit () {
+    # Do not excessively call this
+    if [ "${MAGPIE_TIMELIMIT_MINUTES}X" == "X" ]
+    then
+	timelimitwalltime=`squeue -j ${SLURM_JOB_ID} -h -o %l`
+	Magpie_walltime_to_minutes ${timelimitwalltime}
+	export MAGPIE_TIMELIMIT_MINUTES=${walltimetominutes}
+    fi
+}
+
+# slurmsbatch legacy
+if [ "${MAGPIE_SUBMISSION_TYPE}" == "slurmsbatch" ] || [ "${MAGPIE_SUBMISSION_TYPE}" == "sbatchsrun" ]
+then
+    export MAGPIE_CLUSTER_NODERANK="${SLURM_NODEID:=0}"
+    export MAGPIE_NODE_COUNT="${SLURM_NNODES}"
+    export MAGPIE_NODELIST="${SLURM_JOB_NODELIST}"
+    export MAGPIE_JOB_NAME="${SLURM_JOB_NAME}"
+    export MAGPIE_JOB_ID="${SLURM_JOB_ID}"
+    # Legacy: Use if user set SBATCH_TIMELIMIT
+    if [ "${SBATCH_TIMELIMIT}X" != "X" ]
+    then
+	export MAGPIE_TIMELIMIT_MINUTES="${SBATCH_TIMELIMIT}"
+    else
+	Magpie_calc_slurm_magpie_timelimit
+    fi
+fi
+
+# msubslurm legacy
+if [ "${MAGPIE_SUBMISSION_TYPE}" == "msubslurm" ] || [ "${MAGPIE_SUBMISSION_TYPE}" == "msubslurmsrun" ]
+then
+    export MAGPIE_CLUSTER_NODERANK="${SLURM_NODEID:=0}"
+    export MAGPIE_NODE_COUNT="${SLURM_NNODES}"
+    export MAGPIE_NODELIST="${SLURM_JOB_NODELIST}"
+    export MAGPIE_JOB_NAME="${MOAB_JOBNAME}"
+    export MAGPIE_JOB_ID="${SLURM_JOB_ID}"
+    # Legacy: Use if user set MAGPIE_TIMELIMIT_MINUTES
+    if [ "${MAGPIE_TIMELIMIT_MINUTES}X" == "X" ]
+    then
+	Magpie_calc_slurm_magpie_timelimit
+    fi
+fi
+
+# msubtorque legacy
+if [ "${MAGPIE_SUBMISSION_TYPE}" == "msubtorque" ] || [ "${MAGPIE_SUBMISSION_TYPE}" == "msubtorquepdsh" ]
+then
+    export MAGPIE_CLUSTER_NODERANK="$(($(echo ${MOAB_NODELIST} | sed 's/&/\n/g' | grep -n ${HOSTNAME} | cut -f1 -d:) - 1))"
+    export MAGPIE_NODE_COUNT="${PBS_NUM_NODES}"
+    export MAGPIE_NODELIST=$(echo ${MOAB_NODELIST} | sed 's/&/,/g')
+    export MAGPIE_JOB_NAME="${MOAB_JOBNAME}"
+    export MAGPIE_JOB_ID="${PBS_JOBID}"
+    if [ "${MAGPIE_TIMELIMIT_MINUTES}X" == "X" ]
+    then
+	export MAGPIE_TIMELIMIT_MINUTES=$(expr ${PBS_WALLTIME} / 60)
+    fi
+fi
+
+if [ "${MAGPIE_SUBMISSION_TYPE}" == "lsfmpirun" ]
+then
+    export MAGPIE_CLUSTER_NODERANK="$(echo ${LSB_HOSTS} | fmt -1 | head -1)"
+    export MAGPIE_NODE_COUNT="$(echo ${LSB_HOSTS} | tr " " "\n" | sort -u | wc -w)"
+    export MAGPIE_NODELIST=$(echo ${LSB_HOSTS} | sed 's/ /,/g')
+    export MAGPIE_JOB_NAME="${LSB_JOBNAME}"
+    export MAGPIE_JOB_ID="${LSB_JOBID}"
+    if [ "${MAGPIE_TIMELIMIT_MINUTES}X" == "X" ]
+    then
+        jobinfo=$(bjobs -l ${LSB_JOBID})
+        if [[ $jobinfo == *"Status <P"* ]]
+        then
+            # Pending State for some reason reports mins in seconds
+            walltime=$(bc <<< $(echo $jobinfo | awk '{for(i=1;i<=NF;i++){ if($i=="RUNLIMIT"){printf "%.0f\n", $((i+1))} } }')/60)
+        else
+            # Run State
+            walltime=$(echo $jobinfo | awk '{for(i=1;i<=NF;i++){ if($i=="RUNLIMIT"){printf "%.0f\n", $((i+1))} } }')
+        fi
+        export MAGPIE_TIMELIMIT_MINUTES=${walltime}
+    fi
+fi
+

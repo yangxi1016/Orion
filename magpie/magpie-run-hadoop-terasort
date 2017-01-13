@@ -1,0 +1,156 @@
+#!/bin/bash
+#############################################################################
+#  Copyright (C) 2013-2015 Lawrence Livermore National Security, LLC.
+#  Produced at Lawrence Livermore National Laboratory (cf, DISCLAIMER).
+#  Written by Albert Chu <chu11@llnl.gov>
+#  LLNL-CODE-644248
+#  
+#  This file is part of Magpie, scripts for running Hadoop on
+#  traditional HPC systems.  For details, see <URL>.
+#  
+#  Magpie is free software; you can redistribute it and/or modify it
+#  under the terms of the GNU General Public License as published by
+#  the Free Software Foundation; either version 2 of the License, or
+#  (at your option) any later version.
+#  
+#  Magpie is distributed in the hope that it will be useful, but
+#  WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+#  General Public License for more details.
+#  
+#  You should have received a copy of the GNU General Public License
+#  along with Magpie.  If not, see <http://www.gnu.org/licenses/>.
+#############################################################################
+
+# This script is the core terasort running script.  For the most part,
+# it shouldn't be editted.  See job submission files for configuration
+# details.
+
+source ${MAGPIE_SCRIPTS_HOME}/magpie-common-exports
+source ${MAGPIE_SCRIPTS_HOME}/magpie-common-functions
+source ${MAGPIE_SCRIPTS_HOME}/magpie-variable-conversion
+
+# For this run, we will use cluster specific paths
+Magpie_make_all_local_dirs_node_specific
+
+if [ "${HADOOP_SETUP_TYPE}" == "MR1" ] || [ "${HADOOP_SETUP_TYPE}" == "HDFS1" ]
+then
+    terasortexamples="hadoop-examples-$HADOOP_VERSION.jar"
+    rmoption="-rmr"
+elif [ "${HADOOP_SETUP_TYPE}" == "MR2" ] || [ "${HADOOP_SETUP_TYPE}" == "HDFS2" ]
+then
+    terasortexamples="share/hadoop/mapreduce/hadoop-mapreduce-examples-$HADOOP_VERSION.jar"
+    rmoption="-rm -r"
+fi
+	    
+if [ "${HADOOP_TERASORT_SIZE}X" == "X" ]
+then
+    terasortsize=50000000
+else
+    terasortsize=$HADOOP_TERASORT_SIZE
+fi
+	    
+if [ "${HADOOP_FILESYSTEM_MODE}" == "rawnetworkfs" ]
+then
+    pathprefix="${HADOOP_RAWNETWORKFS_PATH}/"
+elif [ "${HADOOP_FILESYSTEM_MODE}" == "intellustre" ]
+then
+    pathprefix="${HADOOP_INTELLUSTRE_PATH}/"
+fi
+
+if [ "${HADOOP_TERASORT_CLEAR_CACHE}X" != "X" ]
+then
+    if [ "${HADOOP_TERASORT_CLEAR_CACHE}" == "yes" ]
+    then
+	clearcache="-Ddfs.datanode.drop.cache.behind.reads=true -Ddfs.datanode.drop.cache.behind.writes=true"
+    else
+	clearcache=""
+    fi
+else
+    clearcache="-Ddfs.datanode.drop.cache.behind.reads=true -Ddfs.datanode.drop.cache.behind.writes=true"
+fi
+
+if [ "${HADOOP_UDA_SETUP}" == "yes" ] && [ "${HADOOP_SETUP_TYPE}" == "MR2" ]
+then
+    if [ "${extralibjars}X" == "X" ]
+    then
+	extralibjars="-libjars ${HADOOP_UDA_JAR}"
+    else
+	extralibjars="${extralibjars},${HADOOP_UDA_JAR}"
+    fi
+fi
+	    
+if [ "${TACHYON_SETUP}" == "yes" ]
+then
+    tachyonjar="${TACHYON_HOME}/client/target/tachyon-client-${TACHYON_VERSION}-jar-with-dependencies.jar"
+    if [ "${extralibjars}X" == "X" ]
+    then
+	extralibjars="-libjars ${tachyonjar}"
+    else
+	extralibjars="${extralibjars},${tachyonjar}"
+    fi
+fi
+
+cd ${HADOOP_HOME}
+	    
+#
+# Remove previous runs if they are lingering
+#
+
+if ${hadoopcmdprefix}/hadoop fs -ls ${pathprefix} | grep -q terasort-teragen
+then
+    command="${hadoopcmdprefix}/hadoop fs ${rmoption} ${pathprefix}terasort-teragen"
+    $command
+fi
+
+if ${hadoopcmdprefix}/hadoop fs -ls ${pathprefix} | grep -q terasort-sort
+then
+    command="${hadoopcmdprefix}/hadoop fs ${rmoption} ${pathprefix}terasort-sort"
+    $command
+fi
+
+if [ "${HADOOP_TERAGEN_MAP_COUNT:-0}" -ne "0" ]
+then
+    mtasks=$HADOOP_TERAGEN_MAP_COUNT
+else
+    source ${HADOOP_LOCAL_SCRATCH_DIR}/magpie.terasort-defaults
+
+    # Calculate the sensible maximum number of map tasks there should be
+    # Want to add +1 mtasks, make each block just below blocksize
+    # instead of make each task make blocksize + scratch data.
+    terasortfullsize=`expr $terasortsize \* 100`
+    mtasks=`expr $terasortfullsize \/ $MAGPIE_HADOOP_TERASORT_DEFAULT_BLOCKSIZE`
+    mtasks=`expr $mtasks + 1`
+
+    # But use the default map task count if it is smaller than this max.
+
+    if [ "${MAGPIE_HADOOP_TERASORT_DEFAULT_MAPTASKS}" -lt "${mtasks}" ]
+    then
+       mtasks=${MAGPIE_HADOOP_TERASORT_DEFAULT_MAPTASKS}
+    fi
+fi
+
+command="${hadoopcmdprefix}/hadoop jar ${terasortexamples} teragen ${extralibjars} -Dmapred.map.tasks=$mtasks ${clearcache} $terasortsize ${pathprefix}terasort-teragen"
+echo "Running $command" >&2
+$command
+	    
+sleep 30
+	    
+if [ "${HADOOP_TERASORT_REDUCER_COUNT:-0}" -ne "0" ]
+then
+    rtasks=$HADOOP_TERASORT_REDUCER_COUNT
+else
+    rtasks=`expr $HADOOP_SLAVE_COUNT \* 2`
+fi
+
+command="${hadoopcmdprefix}/hadoop jar ${terasortexamples} terasort ${extralibjars} -Dmapred.reduce.tasks=$rtasks -Ddfs.replication=1 ${clearcache} ${pathprefix}terasort-teragen ${pathprefix}terasort-sort"
+
+echo "Running $command" >&2
+$command
+
+command="${hadoopcmdprefix}/hadoop fs ${rmoption} ${pathprefix}terasort-teragen"
+$command
+command="${hadoopcmdprefix}/hadoop fs ${rmoption} ${pathprefix}terasort-sort"
+$command
+
+exit 0

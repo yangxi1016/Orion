@@ -1,0 +1,77 @@
+#!/bin/bash
+#############################################################################
+#  Copyright (C) 2013-2015 Lawrence Livermore National Security, LLC.
+#  Produced at Lawrence Livermore National Laboratory (cf, DISCLAIMER).
+#  Written by Albert Chu <chu11@llnl.gov>
+#  LLNL-CODE-644248
+#  
+#  This file is part of Magpie, scripts for running Hadoop on
+#  traditional HPC systems.  For details, see <URL>.
+#  
+#  Magpie is free software; you can redistribute it and/or modify it
+#  under the terms of the GNU General Public License as published by
+#  the Free Software Foundation; either version 2 of the License, or
+#  (at your option) any later version.
+#  
+#  Magpie is distributed in the hope that it will be useful, but
+#  WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+#  General Public License for more details.
+#  
+#  You should have received a copy of the GNU General Public License
+#  along with Magpie.  If not, see <http://www.gnu.org/licenses/>.
+#############################################################################
+
+# Export helper functions
+#
+# This is used by scripts, don't edit this
+#
+# Unlike 'magpie-common-functions', these are outside of 'magpie' and
+# do not depend on any variables/functions/environment variables
+# within the Magpie system.
+
+Magpie_walltime_to_minutes () {
+    local walltime=$1
+    local numcolons=`echo ${walltime} | awk -F: '{print NF-1}'`
+
+    if [ "${numcolons}" == "2" ]
+    then
+	walltimetominutes=`echo ${walltime} | awk -F':' '{print $1 * 60 + $2 + $3 / 60}' | xargs printf "%1.0f"`
+    elif [ "${numcolons}" == "1" ]
+    then
+	walltimetominutes=`echo ${walltime} | awk -F':' '{print $1 + $2 / 60}' | xargs printf "%1.0f"`
+    fi
+}
+
+# From http://stackoverflow.com/questions/4023830/bash-how-compare-two-strings-in-version-format
+# Returns 0 for ==, 1 for $1 > $2, 2 for $1 < $2
+Magpie_vercomp () {
+    if [[ $1 == $2 ]]
+    then
+        return 0
+    fi
+    local IFS=.
+    local i ver1=($1) ver2=($2)
+    # fill empty fields in ver1 with zeros
+    for ((i=${#ver1[@]}; i<${#ver2[@]}; i++))
+    do
+        ver1[i]=0
+    done
+    for ((i=0; i<${#ver1[@]}; i++))
+    do
+        if [[ -z ${ver2[i]} ]]
+        then
+            # fill empty fields in ver2 with zeros
+            ver2[i]=0
+        fi
+        if ((10#${ver1[i]} > 10#${ver2[i]}))
+        then
+            return 1
+        fi
+        if ((10#${ver1[i]} < 10#${ver2[i]}))
+        then
+            return 2
+        fi
+    done
+    return 0
+}

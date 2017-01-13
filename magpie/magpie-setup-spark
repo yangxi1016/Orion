@@ -1,0 +1,605 @@
+#!/bin/bash
+#############################################################################
+#  Copyright (C) 2013-2015 Lawrence Livermore National Security, LLC.
+#  Produced at Lawrence Livermore National Laboratory (cf, DISCLAIMER).
+#  Written by Albert Chu <chu11@llnl.gov>
+#  LLNL-CODE-644248
+#  
+#  This file is part of Magpie, scripts for running Hadoop on
+#  traditional HPC systems.  For details, see <URL>.
+#  
+#  Magpie is free software; you can redistribute it and/or modify it
+#  under the terms of the GNU General Public License as published by
+#  the Free Software Foundation; either version 2 of the License, or
+#  (at your option) any later version.
+#  
+#  Magpie is distributed in the hope that it will be useful, but
+#  WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+#  General Public License for more details.
+#  
+#  You should have received a copy of the GNU General Public License
+#  along with Magpie.  If not, see <http://www.gnu.org/licenses/>.
+#############################################################################
+
+# This script sets up configuration files for jobs.  For the most
+# part, it shouldn't be editted.  See job submission files for
+# configuration details.
+
+if [ "${SPARK_SETUP}" != "yes" ]
+then
+    exit 0
+fi
+
+source ${MAGPIE_SCRIPTS_HOME}/magpie-submission-convert
+source ${MAGPIE_SCRIPTS_HOME}/magpie-common-exports
+source ${MAGPIE_SCRIPTS_HOME}/magpie-common-functions
+source ${MAGPIE_SCRIPTS_HOME}/magpie-variable-conversion
+
+# sparknoderank set if succeed
+if ! Magpie_am_I_a_spark_node
+then
+    exit 0
+fi
+
+# For rest of setup, we will use cluster specific paths
+Magpie_make_all_local_dirs_node_specific
+
+extrasparkjavaopts=""
+extrasparkdaemonjavaopts=""
+
+if [ "${SPARK_DAEMON_HEAP_MAX}X" != "X" ]
+then
+    sparkdaemonheapmax="${SPARK_DAEMON_HEAP_MAX}"
+else
+    sparkdaemonheapmax="1000"
+fi 
+
+# Sets threadstouse and proccount
+Magpie_calculate_threadstouse
+
+# Sets memorytouse
+Magpie_calculate_memorytouse
+
+if [ "${SPARK_WORKER_CORES_PER_NODE}X" != "X" ]
+then
+    workercores=${SPARK_WORKER_CORES_PER_NODE}
+else
+    workercores=${threadstouse}
+fi
+
+# Spark is special, can't set > # of cores 
+if [ "${workercores}" -gt "${proccount}" ]
+then
+    workercores=${proccount}
+fi
+
+if [ "${SPARK_WORKER_MEMORY_PER_NODE}X" != "X" ]
+then
+    workermemory=${SPARK_WORKER_MEMORY_PER_NODE}
+else
+    workermemory=${memorytouse}
+fi
+
+if [ "${SPARK_WORKER_DIRECTORY}X" != "X" ]
+then
+    workerdirectory=${SPARK_WORKER_DIRECTORY}
+else
+    workerdirectory="${SPARK_LOCAL_DIR}/work"
+fi
+
+if [ "${SPARK_JOB_MEMORY}X" != "X" ]
+then
+    sparkmem=${SPARK_JOB_MEMORY}
+else
+    sparkmem=${workermemory}
+fi
+
+if [ "${SPARK_DRIVER_MEMORY}X" != "X" ]
+then
+    sparkdrivermemory=${SPARK_DRIVER_MEMORY}
+else
+    sparkdrivermemory=${sparkmem}
+fi
+
+#
+# Calculate settings in SPARK_JAVA_OPTS
+#
+
+# Before 1.0.0, set in SPARK_JAVA_OPTS, afterwards set in spark-defaults.conf
+# - spark-defaults.conf for >= 1.0.0 set up below
+if echo ${SPARK_VERSION} | grep -q -E "0\.9\.[0-9]"
+then 
+    SPARK_JAVA_OPTS="-Dspark.ui.port=${SPARK_APPLICATION_DASHBOARD_PORT}"
+else
+    SPARK_JAVA_OPTS=""
+fi
+
+if [ "${SPARK_LOCAL_SCRATCH_DIR}X" == "X" ]
+then
+    # sets hadooptmpdir and fsdefault
+    Magpie_calculate_hadoop_filesystem_paths ${sparknoderank}
+
+    sparklocalscratchdirpath="${hadooptmpdir}/spark/node-${sparknoderank}"
+    
+    if [ ! -d "${sparklocalscratchdirpath}" ]
+    then
+	mkdir -p ${sparklocalscratchdirpath}
+	if [ $? -ne 0 ] ; then
+	    echo "mkdir failed making ${sparklocalscratchdirpath}"
+	    exit 1
+	fi
+    fi
+else
+    # Setup node directory per node 
+    sparklocalscratchdirpath="${SPARK_LOCAL_SCRATCH_DIR}/node-${sparknoderank}"
+
+    mkdir -p ${sparklocalscratchdirpath}
+    if [ $? -ne 0 ] ; then
+	echo "mkdir failed making ${sparklocalscratchdirpath}"
+	exit 1
+    fi
+fi
+
+# Before 1.0.0, set spark.local.dir in SPARK_JAVA_OPTS, afterwards set environment variable SPARK_LOCAL_DIRS
+# - environment variable for >= 1.0.0 set up spark-env.sh below
+if echo ${SPARK_VERSION} | grep -q -E "0\.9\.[0-9]"
+then 
+    SPARK_JAVA_OPTS="${SPARK_JAVA_OPTS} -Dspark.local.dir=${sparklocalscratchdirpath}"
+fi
+
+# Optimal depends on file system
+if [ "${HADOOP_SETUP}" == "yes" ]
+then
+    if [ "${HADOOP_FILESYSTEM_MODE}" == "hdfs" ]
+    then
+	sparkshufflebufferkb=100
+	sparkshufflebuffer=100k
+	sparkshuffleconsolidatefiles="false"
+    elif [ "${HADOOP_FILESYSTEM_MODE}" == "hdfsoverlustre" ] \
+	|| [ "${HADOOP_FILESYSTEM_MODE}" == "hdfsovernetworkfs" ]
+    then
+        # Default block size is 1M in Lustre
+        # XXX: If not default, can get from lctl or similar?
+        # If other networkFS, just assume like Lustre
+	sparkshufflebufferkb=1024
+	sparkshufflebuffer=1024k
+	sparkshuffleconsolidatefiles="true"
+    elif [ "${HADOOP_FILESYSTEM_MODE}" == "rawnetworkfs" ] \
+	|| [ "${HADOOP_FILESYSTEM_MODE}" == "magpienetworkfs" ]
+    then
+        # Assuming Lustre, so copy above 1M
+	sparkshufflebufferkb=1024
+	sparkshufflebuffer=1024k
+	sparkshuffleconsolidatefiles="true"
+    elif [ "${HADOOP_FILESYSTEM_MODE}" == "intellustre" ]
+    then
+        # Assuming Lustre, so copy above 1M
+	sparkshufflebufferkb=1024
+	sparkshufflebuffer=1024k
+	sparkshuffleconsolidatefiles="true"
+    fi 
+else
+    # Accessing filesystem directly, assume Lustre
+    sparkshufflebufferkb=1024
+    sparkshufflebuffer=1024k
+    sparkshuffleconsolidatefiles="true"
+fi
+
+# Before 1.0.0, set in SPARK_JAVA_OPTS, afterwards set in spark-defaults.conf
+# - spark-defaults.conf for >= 1.0.0 set up below
+if echo ${SPARK_VERSION} | grep -q -E "0\.9\.[0-9]"
+then 
+    SPARK_JAVA_OPTS="${SPARK_JAVA_OPTS} -Dspark.shuffle.file.buffer.kb=${sparkshufflebufferkb} -Dspark.shuffle.consolidateFiles=${sparkshuffleconsolidatefiles}"
+fi
+
+if [ "${SPARK_DEFAULT_PARALLELISM}X" == "X" ]
+then
+    sparkdefaultparallelism="${SPARK_SLAVE_COUNT}"
+else
+    sparkdefaultparallelism="${SPARK_DEFAULT_PARALLELISM}"
+fi
+
+# Before 1.0.0, set in SPARK_JAVA_OPTS, afterwards set in spark-defaults.conf
+# - spark-defaults.conf for >= 1.0.0 set up below
+if echo ${SPARK_VERSION} | grep -q -E "0\.9\.[0-9]"
+then 
+    SPARK_JAVA_OPTS="${SPARK_JAVA_OPTS} -Dspark.default.parallelism=${sparkdefaultparallelism}"
+fi
+
+if [ "${SPARK_STORAGE_MEMORY_FRACTION}X" == "X" ]
+then
+    sparkstoragememoryfraction="0.6"
+else
+    sparkstoragememoryfraction="${SPARK_STORAGE_MEMORY_FRACTION}"
+fi
+
+# Before 1.0.0, set in SPARK_JAVA_OPTS, afterwards set in spark-defaults.conf
+# - spark-defaults.conf for >= 1.0.0 set up below
+if echo ${SPARK_VERSION} | grep -q -E "0\.9\.[0-9]"
+then 
+    SPARK_JAVA_OPTS="${SPARK_JAVA_OPTS} -Dspark.storage.memoryFraction=${sparkstoragememoryfraction}"
+fi
+
+if [ "${SPARK_SHUFFLE_MEMORY_FRACTION}X" == "X" ]
+then
+    sparkshufflememoryfraction="0.3"
+else
+    sparkshufflememoryfraction="${SPARK_SHUFFLE_MEMORY_FRACTION}"
+fi
+
+# Before 1.0.0, set in SPARK_JAVA_OPTS, afterwards set in spark-defaults.conf
+# - spark-defaults.conf for >= 1.0.0 set up below
+if echo ${SPARK_VERSION} | grep -q -E "0\.9\.[0-9]"
+then 
+    SPARK_JAVA_OPTS="${SPARK_JAVA_OPTS} -Dspark.shuffle.memoryFraction=${sparkshufflememoryfraction}"
+fi
+
+if [ "${SPARK_DEPLOY_SPREADOUT}X" == "X" ]
+then
+    sparkdeployspreadout="true"
+else
+    sparkdeployspreadout="${SPARK_DEPLOY_SPREADOUT}"
+fi
+
+# Before 1.0.0, set in SPARK_JAVA_OPTS, afterwards set in spark-defaults.conf
+# - spark-defaults.conf for >= 1.0.0 set up below
+if echo ${SPARK_VERSION} | grep -q -E "0\.9\.[0-9]"
+then 
+    SPARK_JAVA_OPTS="${SPARK_JAVA_OPTS} -Dspark.deploy.spreadOut=${sparkdeployspreadout}"
+fi
+
+# Tests show proc count is about the best performing when you have
+# many cores, which is likely the norm in HPC clusters
+
+akkathreads=`expr ${proccount}`
+
+if [ "${akkathreads}" -lt "4" ]
+then
+    akkathreads=4
+fi
+
+# Before 1.0.0, set in SPARK_JAVA_OPTS, afterwards set in spark-defaults.conf
+# - spark-defaults.conf for >= 1.0.0 set up below
+if echo ${SPARK_VERSION} | grep -q -E "0\.9\.[0-9]"
+then 
+    SPARK_JAVA_OPTS="${SPARK_JAVA_OPTS} -Dspark.akka.threads=${akkathreads}"
+fi
+
+openfiles=`ulimit -n`
+if [ "${openfiles}" != "unlimited" ]
+then
+    openfileshardlimit=`ulimit -H -n`
+
+    # we estimate 8192 per 100 nodes, minimum 16384, max 65536.
+    # Obviously depends on many factors such as core count, but it's a
+    # reasonble and safe over-estimate calculated based on experience.
+    openfilesslavecount=`expr ${SPARK_SLAVE_COUNT} \/ 100`
+    openfilescount=`expr ${openfilesslavecount} \* 8192`
+    if [ "${openfilescount}" -lt "16384" ]
+    then
+	openfilescount=16384
+    fi
+    if [ "${openfilescount}" -gt "65536" ]
+    then
+	openfilescount=65536
+    fi
+    
+    if [ "${openfileshardlimit}" != "unlimited" ]
+    then
+        if [ ${openfilescount} -gt ${openfileshardlimit} ]
+        then
+            openfilescount=${openfileshardlimit}
+        fi
+    fi
+else
+    openfilescount="unlimited"
+fi
+
+userprocesses=`ulimit -u`
+if [ "${userprocesses}" != "unlimited" ]
+then
+    userprocesseshardlimit=`ulimit -H -u`
+
+    # we estimate 2048 per 100 nodes, minimum 4096, max 32768.
+    userprocessesslavecount=`expr ${SPARK_SLAVE_COUNT} \/ 100`
+    userprocessescount=`expr ${userprocessesslavecount} \* 2048`
+    if [ "${userprocessescount}" -lt "4096" ]
+    then
+	userprocessescount=4096
+    fi
+    if [ "${userprocessescount}" -gt "32768" ]
+    then
+	userprocessescount=32768
+    fi
+    
+    if [ "${userprocesseshardlimit}" != "unlimited" ]
+    then
+        if [ ${userprocessescount} -gt ${userprocesseshardlimit} ]
+        then
+            userprocessescount=${userprocesseshardlimit}
+        fi
+    fi
+else
+    userprocessescount="unlimited"
+fi
+
+if [ "${SPARK_JOB_JAVA_OPTS}X" != "X" ]
+then
+    if [ "${SPARK_JAVA_OPTS}X" != "X" ]
+    then
+	SPARK_JAVA_OPTS="${SPARK_JAVA_OPTS} ${SPARK_JOB_JAVA_OPTS}"
+    else
+	SPARK_JAVA_OPTS="${SPARK_JOB_JAVA_OPTS}"
+    fi
+fi
+
+# set java.io.tmpdir
+
+# After 1.0.0, everything in spark-defaults.conf
+# If coded correctly in this script, SPARK_JAVA_OPTS should be empty
+# unless user set something in it of their own volition.
+#
+# After 1.0.0, other configs below take care setting extra java opts
+if [ "${SPARK_JAVA_OPTS}X" != "X" ]
+then
+    if ! echo ${SPARK_JAVA_OPTS} | grep -q -E "java.io.tmpdir"
+    then
+	export SPARK_JAVA_OPTS="${SPARK_JAVA_OPTS} -Djava.io.tmpdir=${SPARK_LOCAL_SCRATCH_DIR}/tmp"
+    fi
+fi
+
+extrasparkjavaopts="${extrasparkjavaopts}${extrasparkjavaopts:+" "}-Djava.io.tmpdir=${SPARK_LOCAL_SCRATCH_DIR}/tmp"
+
+extrasparkdaemonjavaopts="${extrasparkdaemonjavaopts}${extrasparkdaemonjavaopts:+" "}-Djava.io.tmpdir=${SPARK_LOCAL_SCRATCH_DIR}/tmp"
+
+if [ ! -d "${SPARK_LOCAL_SCRATCH_DIR}/tmp" ]
+then
+    mkdir -p ${SPARK_LOCAL_SCRATCH_DIR}/tmp
+    if [ $? -ne 0 ] ; then
+        echo "mkdir failed making ${SPARK_LOCAL_SCRATCH_DIR}/tmp"
+        exit 1
+    fi
+fi
+
+# disable hsperfdata if using NO_LOCAL_DIR
+if [ "${MAGPIE_NO_LOCAL_DIR}" == "yes" ]
+then
+    extrasparkjavaopts="${extrasparkjavaopts}${extrasparkjavaopts:+" "}-XX:-UsePerfData"
+
+    extrasparkdaemonjavaopts="${extrasparkdaemonjavaopts}${extrasparkdaemonjavaopts:+" "}-XX:-UsePerfData"
+fi
+
+#
+# Get config files for setup
+#
+
+if [ "${SPARK_CONF_FILES}X" == "X" ]
+then
+    sparkconffiledir=${MAGPIE_SCRIPTS_HOME}/conf
+else
+    sparkconffiledir=${SPARK_CONF_FILES}
+fi
+
+if echo ${SPARK_VERSION} | grep -q -E "1\.[0-9]\.[0-9]"
+then
+    pre_sparkenvsh=${sparkconffiledir}/spark-env-post-1-0.sh
+else
+    pre_sparkenvsh=${sparkconffiledir}/spark-env-pre-1-0.sh
+fi
+pre_sparkdefaultsconf=${sparkconffiledir}/spark-defaults.conf
+pre_log4jproperties=${sparkconffiledir}/spark.log4j.properties
+
+if [ "${TACHYON_SETUP}" == "yes" ]
+then
+    pre_sparkdefaultsconf_tachyon=${sparkconffiledir}/spark-defaults.conf-tachyon
+fi
+
+if [ ! -f "${pre_sparkenvsh}" ] \
+    || [ ! -f "${pre_sparkdefaultsconf}" ] \
+    || [ ! -f "${pre_log4jproperties}" ] \
+    || ( [ "${pre_sparkdefaultsconf_tachyon}X" != "X" ] && [ ! -f "${pre_sparkdefaultsconf_tachyon}" ] )
+then
+    echo "Missing Spark configuration files in ${sparkconffiledir}"
+    exit 1
+fi
+
+post_sparkenvsh=${SPARK_CONF_DIR}/spark-env.sh
+post_sparkdefaultsconf=${SPARK_CONF_DIR}/spark-defaults.conf
+post_log4jproperties=${SPARK_CONF_DIR}/log4j.properties
+
+#
+# Setup Spark configuration files and environment files
+#
+
+javahomesubst=`echo "${JAVA_HOME}" | sed "s/\\//\\\\\\\\\//g"`
+sparkhomesubst=`echo "${SPARK_HOME}" | sed "s/\\//\\\\\\\\\//g"`
+sparkpiddirsubst=`echo "${SPARK_PID_DIR}" | sed "s/\\//\\\\\\\\\//g"`
+workerdirectorysubst=`echo "${workerdirectory}" | sed "s/\\//\\\\\\\\\//g"`
+
+extrasparkdaemonjavaoptssubst=`echo "${extrasparkdaemonjavaopts}" | sed "s/\\//\\\\\\\\\//g"`
+
+cp ${pre_sparkenvsh} ${post_sparkenvsh}
+
+sed -i \
+    -e "s/SPARK_JAVA_HOME/${javahomesubst}/g" \
+    -e "s/SPARKHOME/${sparkhomesubst}/g" \
+    -e "s/SPARKPIDDIR/${sparkpiddirsubst}/g" \
+    -e "s/SPARK_DAEMON_HEAP_MAX/${sparkdaemonheapmax}/g" \
+    -e "s/SPARKWORKERCORES/${workercores}/g" \
+    -e "s/SPARKWORKERMEMORY/${workermemory}/g" \
+    -e "s/SPARKWORKERDIR/${workerdirectorysubst}/g" \
+    -e "s/SPARKMEM/${sparkmem}/g" \
+    -e "s/SPARKDRIVERMEMORY/${sparkdrivermemory}/g" \
+    -e "s/SPARKMASTERPORT/${SPARK_MASTER_PORT}/g" \
+    -e "s/SPARKMASTERWEBUIPORT/${SPARK_MASTER_WEBUI_PORT}/g" \
+    -e "s/SPARKWORKERWEBUIPORT/${SPARK_WORKER_WEBUI_PORT}/g" \
+    -e "s/SPARKDAEMONJAVAOPTS/${extrasparkdaemonjavaoptssubst}/g" \
+    ${post_sparkenvsh}
+
+echo "export SPARK_LOG_DIR=\"${SPARK_LOG_DIR}\"" >> ${post_sparkenvsh}
+
+if [ "${SPARK_JOB_CLASSPATH}X" != "X" ]
+then
+    sparkclasspath="${SPARK_JOB_CLASSPATH}"
+fi
+
+# Must put jar in for 0.9.1
+if [ "${TACHYON_SETUP}" == "yes" ]
+then
+    tachyon_jar="${TACHYON_HOME}/client/target/tachyon-client-${TACHYON_VERSION}-jar-with-dependencies.jar"
+    
+    if [ "${sparkclasspath}X" != "X" ]
+    then
+	sparkclasspath="${tachyon_jar}:${sparkclasspath}"
+    else
+	sparkclasspath="${tachyon_jar}"
+    fi
+fi
+
+if [ "${PHOENIX_SETUP}" == "yes" ]
+then
+    phoenix_jar="${PHOENIX_HOME}/phoenix-${PHOENIX_VERSION}-client.jar"
+    if [ "${sparkclasspath}X" != "X" ]
+    then
+        sparkclasspath="${phoenix_jar}:${sparkclasspath}"
+    else
+        sparkclasspath="${phoenix_jar}"
+    fi
+fi
+
+# Before 1.0.0, set in SPARK_CLASSPATH and SPARK_LIBRARY_PATH,
+# afterwards set in spark-defaults.conf
+# - spark-defaults.conf for >= 1.0.0 set up below
+if echo ${SPARK_VERSION} | grep -q -E "0\.9\.[0-9]"
+then 
+    if [ "${sparkclasspath}X" != "X" ]
+    then
+	echo "export SPARK_CLASSPATH=\"${sparkclasspath}\"" >> ${post_sparkenvsh}
+    fi
+
+    if [ "${SPARK_JOB_LIBRARY_PATH}X" != "X" ]
+    then
+	echo "export SPARK_LIBRARY_PATH=\"${SPARK_JOB_LIBRARY_PATH}\"" >> ${post_sparkenvsh}
+    fi
+fi
+
+# After 1.0.0, everything in spark-defaults.conf
+if [ "${SPARK_JAVA_OPTS}X" != "X" ]
+then 
+    echo "export SPARK_JAVA_OPTS=\"${SPARK_JAVA_OPTS}\"" >> ${post_sparkenvsh}
+fi
+
+if [ "${MAGPIE_REMOTE_CMD:-ssh}" != "ssh" ]
+then
+    echo "export SPARK_SSH_CMD=\"${MAGPIE_REMOTE_CMD}\"" >> ${post_sparkenvsh}
+fi
+if [ "${MAGPIE_REMOTE_CMD_OPTS}X" != "X" ]
+then
+    echo "export SPARK_SSH_OPTS=\"${MAGPIE_REMOTE_CMD_OPTS}\"" >> ${post_sparkenvsh}
+fi
+
+# Before 1.0.0, set spark.local.dir in SPARK_JAVA_OPTS, afterwards set environment variable SPARK_LOCAL_DIRS
+# - spark.local.dir for < 1.0.0 set above
+if echo ${SPARK_VERSION} | grep -q -E "1\.[0-9]\.[0-9]"
+then
+    echo "export SPARK_LOCAL_DIRS=\"${sparklocalscratchdirpath}\"" >> ${post_sparkenvsh}
+fi
+
+# Spark requires HADOOP_CONF_DIR and YARN_CONF_DIR to be set for it to
+# automatically find/parse Hadoop conf files.
+#
+# We go ahead and set HADOOP_HOME for good measure just incase too.
+#
+if [ "${HADOOP_SETUP}" == "yes" ]
+then
+    echo "export HADOOP_HOME=\"${HADOOP_HOME}\"" >> ${post_sparkenvsh}
+    echo "export HADOOP_CONF_DIR=\"${HADOOP_CONF_DIR}\"" >> ${post_sparkenvsh}
+    echo "export YARN_CONF_DIR=\"${YARN_CONF_DIR}\"" >> ${post_sparkenvsh}
+fi
+
+if [ "${SPARK_ENVIRONMENT_EXTRA_PATH}X" != "X" ] && [ -f ${SPARK_ENVIRONMENT_EXTRA_PATH} ]
+then
+    cat ${SPARK_ENVIRONMENT_EXTRA_PATH} >> ${post_sparkenvsh}
+else
+    echo "ulimit -n ${openfilescount}" >> ${post_sparkenvsh}
+    echo "ulimit -u ${userprocessescount}" >> ${post_sparkenvsh}
+fi
+
+if echo ${SPARK_VERSION} | grep -q -E "1\.[0-9]\.[0-9]"
+then
+    if [ "${sparkclasspath}X" != "X" ]
+    then
+        sparkclasspathsubst=`echo "${sparkclasspath}" | sed "s/\\//\\\\\\\\\//g"`
+        sparkdriverclasspathsubst=`echo "${sparkclasspath}" | sed "s/\\//\\\\\\\\\//g"`
+    fi
+
+    if [ "${SPARK_JOB_LIBRARY_PATH}X" != "X" ]
+    then
+	sparklibrarypathsubst=`echo "${SPARK_JOB_LIBRARY_PATH}" | sed "s/\\//\\\\\\\\\//g"`
+        sparkdriverlibrarypathsubst=`echo "${SPARK_JOB_LIBRARY_PATH}" | sed "s/\\//\\\\\\\\\//g"`
+    fi
+
+    if [ "${TACHYON_SETUP}" == "yes" ]
+    then
+	sparktachyonstoreurl="tachyon://${TACHYON_MASTER_NODE}:${TACHYON_MASTER_PORT}"
+	sparktachyonstoreurlsubst=`echo "${sparktachyonstoreurl}" | sed "s/\\//\\\\\\\\\//g"`
+    fi
+
+    cp ${pre_sparkdefaultsconf} ${post_sparkdefaultsconf}
+
+    if [ "${pre_sparkdefaultsconf_tachyon}X" != "X" ]
+    then
+	sed -i -e "/@TACHYON@/{r ${pre_sparkdefaultsconf_tachyon}" -e "d}" ${post_sparkdefaultsconf}
+    else
+	sed -i -e "/@TACHYON@/,+1d" ${post_sparkdefaultsconf}
+    fi
+
+    # This is not for legitimate security as it can easily be
+    # calculated.  It is for sanity "just in case we screwed up a
+    # config" security.
+    sparkauthenticatesecret=`echo -n ${MAGPIE_JOB_ID} | md5sum | awk '{print $1}'`
+
+    extrasparkjavaoptssubst=`echo "${extrasparkjavaopts}" | sed "s/\\//\\\\\\\\\//g"`
+
+    sed -i \
+	-e "s/SPARKMASTERNODE/${SPARK_MASTER_NODE}/g" \
+	-e "s/SPARKMASTERPORT/${SPARK_MASTER_PORT}/g" \
+	-e "s/SPARKSHUFFLEFILEBUFFERKB/${sparkshufflebufferkb}/g" \
+	-e "s/SPARKSHUFFLEFILEBUFFER/${sparkshufflebuffer}/g" \
+	-e "s/SPARKSHUFFLECONSOLIDATEFILES/${sparkshuffleconsolidatefiles}/g" \
+	-e "s/SPARKDEFAULTPARALLELISM/${sparkdefaultparallelism}/g" \
+	-e "s/SPARKEXECUTORMEMORY/${sparkmem}/g" \
+	-e "s/SPARKUIPORT/${SPARK_APPLICATION_DASHBOARD_PORT}/g" \
+	-e "s/SPARKEXECUTOREXTRACLASSPATH/${sparkclasspathsubst}/g" \
+	-e "s/SPARKEXECUTOREXTRALIBRARYPATH/${sparklibrarypathsubst}/g" \
+	-e "s/SPARKDRIVEREXTRACLASSPATH/${sparkdriverclasspathsubst}/g" \
+	-e "s/SPARKDRIVEREXTRALIBRARYPATH/${sparkdriverlibrarypathsubst}/g" \
+	-e "s/SPARKAKKATHREADS/${akkathreads}/g" \
+	-e "s/SPARKSTORAGEMEMORYFRACTION/${sparkstoragememoryfraction}/g" \
+	-e "s/SPARKSHUFFLEMEMORYFRACTION/${sparkshufflememoryfraction}/g" \
+	-e "s/SPARKDEPLOYSPREADOUT/${sparkdeployspreadout}/g" \
+	-e "s/SPARKTACHYONSTOREURL/${sparktachyonstoreurlsubst}/g" \
+	-e "s/SPARKAUTHENTICATESECRET/${sparkauthenticatesecret}/g" \
+	-e "s/EXTRASPARKJAVAOPTS/${extrasparkjavaoptssubst}/g" \
+	${post_sparkdefaultsconf}
+    
+    # Remove lingering "-bin-hadoop2.4" and similar text"
+
+    sparktestversion=`echo $SPARK_VERSION | cut -f1 -d"-"`
+
+    # Handle special settings depending on version
+    # 0 is =, 1 is >, 2 is <
+    Magpie_vercomp ${sparktestversion} 1.3
+    vercomp_result=$?
+    if [ "${vercomp_result}" == "1" ]
+    then
+	sed -i -e "s/spark.shuffle.file.buffer.kb/# spark.shuffle.file.buffer.kb/" ${post_sparkdefaultsconf}
+    else
+	sed -i -e "s/spark.shuffle.file.buffer\s/# spark.shuffle.file.buffer/" ${post_sparkdefaultsconf}
+    fi
+fi
+
+cp ${pre_log4jproperties} ${post_log4jproperties}
+
+exit 0

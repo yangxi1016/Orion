@@ -1,0 +1,2276 @@
+#!/bin/bash
+#############################################################################
+#  Copyright (C) 2013-2015 Lawrence Livermore National Security, LLC.
+#  Produced at Lawrence Livermore National Laboratory (cf, DISCLAIMER).
+#  Written by Albert Chu <chu11@llnl.gov>
+#  LLNL-CODE-644248
+#  
+#  This file is part of Magpie, scripts for running Hadoop on
+#  traditional HPC systems.  For details, see <URL>.
+#  
+#  Magpie is free software; you can redistribute it and/or modify it
+#  under the terms of the GNU General Public License as published by
+#  the Free Software Foundation; either version 2 of the License, or
+#  (at your option) any later version.
+#  
+#  Magpie is distributed in the hope that it will be useful, but
+#  WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+#  General Public License for more details.
+#  
+#  You should have received a copy of the GNU General Public License
+#  along with Magpie.  If not, see <http://www.gnu.org/licenses/>.
+#############################################################################
+
+# This script is the core processing script for setting up daemons and
+# running jobs.  For the most part, it shouldn't be editted.  See
+# job submission files for configuration details.
+
+source ${MAGPIE_SCRIPTS_HOME}/magpie-submission-convert
+source ${MAGPIE_SCRIPTS_HOME}/magpie-common-exports
+source ${MAGPIE_SCRIPTS_HOME}/magpie-common-functions
+source ${MAGPIE_SCRIPTS_HOME}/magpie-helper-functions
+source ${MAGPIE_SCRIPTS_HOME}/magpie-variable-conversion
+source ${MAGPIE_SCRIPTS_HOME}/magpie-generated-exports
+
+if ! Magpie_am_I_master
+then
+    exit 0
+fi
+
+# Initially make variables specific to node
+Magpie_make_all_local_dirs_node_specific
+
+# Output some general info
+echo "*******************************************************"
+echo "* Magpie General Job Info"
+echo "*"
+echo "* Job Nodelist: ${MAGPIE_NODELIST}"
+echo "* Job Nodecount: ${MAGPIE_NODE_COUNT}"
+echo "* Job Timelimit in Minutes: ${MAGPIE_TIMELIMIT_MINUTES}"
+echo "* Job Name: ${MAGPIE_JOB_NAME}"
+echo "* Job ID: ${MAGPIE_JOB_ID}"
+echo "*"
+echo "*******************************************************"
+
+if [ "${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT_SHELL}X" != "X" ]
+then
+    MAGPIE_SHELL="${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT_SHELL}"
+else
+    MAGPIE_SHELL="${SHELL}"
+fi
+
+if [ "${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}X" != "X" ]
+then
+    if [ -f "${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}" ]
+    then
+	rm -f ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+    fi
+    
+    touch ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+    chmod 700 ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+
+    echo "#!${MAGPIE_SHELL}" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+    echo "" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+
+    echo "# Common environment variables for Job = ${MAGPIE_JOB_NAME}, Job ID = ${MAGPIE_JOB_ID}" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+
+    echo "" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+    if [ "${JAVA_HOME}X" != "X" ]
+    then
+	if echo $MAGPIE_SHELL | grep -q csh
+	then
+	    echo "setenv JAVA_HOME \"${JAVA_HOME}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	else
+	    echo "export JAVA_HOME=\"${JAVA_HOME}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	fi
+	echo "" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+    fi
+fi
+
+# Flag for setup check
+prior_setup_successful=true
+
+#
+# Setup ZooKeeper
+#
+
+totalsleepwait=0
+
+# Zookeeper setup comes first, as other things like Hbase & Storm require it
+
+if [ "${ZOOKEEPER_SETUP}" == "yes" ] && [ "${prior_setup_successful}" == "true" ]
+then
+    if [ "${ZOOKEEPER_MODE}" != "setuponly" ]
+    then
+	# Make variables unspecified for launching
+	Magpie_make_all_local_dirs_unspecified
+
+	echo "Starting Zookeeper"
+	${MAGPIE_SCRIPTS_HOME}/bin/magpie-zookeeper.sh start
+
+	# Make variables specific now within Magpie
+	Magpie_make_all_local_dirs_node_specific
+
+        # My rough estimate for setup time is 30 seconds per 128 nodes
+	sleepwait=`expr ${ZOOKEEPER_REPLICATION_COUNT} \/ 128 \* 30`
+	if [ ${sleepwait} -lt 30 ]
+	then
+            sleepwait=30
+	fi
+	echo "Waiting ${sleepwait} seconds to allow Zookeeper daemons to setup"
+	sleep ${sleepwait}
+	totalsleepwait=`expr ${totalsleepwait} + ${sleepwait}`
+    fi
+
+    echo "*******************************************************"
+    echo "*"
+    echo "* Zookeeper Information"
+    echo "*"
+    if [ "${ZOOKEEPER_MODE}" == "setuponly" ]
+    then
+ 	echo "* To setup, you probably want to run:" 
+	echo "*   ${MAGPIE_REMOTE_CMD:-ssh}${MAGPIE_REMOTE_CMD_OPTS:+" "}${MAGPIE_REMOTE_CMD_OPTS} ${ZOOKEEPER_MASTER_NODE}"
+	if echo $MAGPIE_SHELL | grep -q csh
+	then
+	    echo "*   setenv ZOOCFGDIR \"${ZOOKEEPER_CONF_DIR}\""
+	else
+	    echo "*   export ZOOCFGDIR=\"${ZOOKEEPER_CONF_DIR}\""
+	fi
+	echo "*   cd $MAGPIE_SCRIPTS_HOME"
+	echo "*   bin/magpie-zookeeper.sh start"
+	echo "*" 
+    fi
+    echo "* To end/cleanup your session, kill the daemons via:"
+    echo "*" 
+    echo "*   ${MAGPIE_REMOTE_CMD:-ssh}${MAGPIE_REMOTE_CMD_OPTS:+" "}${MAGPIE_REMOTE_CMD_OPTS} ${ZOOKEEPER_MASTER_NODE}"
+    if echo $MAGPIE_SHELL | grep -q csh
+    then
+	echo "*   setenv ZOOCFGDIR \"${ZOOKEEPER_CONF_DIR}\""
+    else
+	echo "*   export ZOOCFGDIR=\"${ZOOKEEPER_CONF_DIR}\""
+    fi
+    echo "*   cd $MAGPIE_SCRIPTS_HOME"
+    echo "*   bin/magpie-zookeeper.sh stop"
+    echo "*" 
+    echo "* Some additional environment variables you may sometimes wish to set"
+    echo "*" 
+    if echo $MAGPIE_SHELL | grep -q csh
+    then
+	echo "*   setenv JAVA_HOME \"${JAVA_HOME}\""
+	echo "*   setenv ZOOKEEPER_HOME \"${ZOOKEEPER_HOME}\""
+    else
+	echo "*   export JAVA_HOME=\"${JAVA_HOME}\""
+	echo "*   export ZOOKEEPER_HOME=\"${ZOOKEEPER_HOME}\""
+    fi
+    if [ "${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}X" != "X" ]
+    then
+	echo "*"
+	echo "* If running interactively, sourcing"
+	echo "*"
+	echo "* ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}"
+	echo "*"
+	echo "* will set most common environment variables for your job."
+    fi
+    echo "*" 
+    echo "*******************************************************"
+
+    if [ "${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}X" != "X" ]
+    then
+	if echo $MAGPIE_SHELL | grep -q csh
+	then
+	    echo "setenv ZOOKEEPER_HOME \"${ZOOKEEPER_HOME}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    echo "setenv ZOOCFGDIR \"${ZOOKEEPER_CONF_DIR}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    echo "setenv ZOOKEEPER_CONF_DIR \"${ZOOKEEPER_CONF_DIR}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    echo "setenv ZOOKEEPER_LOG_DIR \"${ZOOKEEPER_LOG_DIR}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    echo "setenv ZOOKEEPER_NODES \"${ZOOKEEPER_NODES}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    echo "setenv ZOOKEEPER_NODES_FIRST \"${ZOOKEEPER_NODES_FIRST}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	else
+	    echo "export ZOOKEEPER_HOME=\"${ZOOKEEPER_HOME}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    echo "export ZOOCFGDIR=\"${ZOOKEEPER_CONF_DIR}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    echo "export ZOOKEEPER_CONF_DIR=\"${ZOOKEEPER_CONF_DIR}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    echo "export ZOOKEEPER_LOG_DIR=\"${ZOOKEEPER_LOG_DIR}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    echo "export ZOOKEEPER_NODES=\"${ZOOKEEPER_NODES}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    echo "export ZOOKEEPER_NODES_FIRST=\"${ZOOKEEPER_NODES_FIRST}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	fi
+	echo "" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+    fi
+    
+    if [ ${ZOOKEEPER_MODE} != "setuponly" ]
+    then
+	magpiestartuptimeseconds=`expr ${MAGPIE_STARTUP_TIME} \* 60`
+
+	if [ "${totalsleepwait}" -lt "${magpiestartuptimeseconds}" ]
+	then  
+	    # Could be more dynamic w/ slurm call to determine current
+	    # run time, but probably is sufficient for this trivial
+	    # part.  Minimally, have to leave the totalsleepwait code
+	    # around for non-slurm systems.
+	    zookeepermaxwaitseconds=`expr ${magpiestartuptimeseconds} - ${totalsleepwait}`
+	    
+	    if [ "${zookeepermaxwaitseconds}" -lt 30 ]
+	    then
+		zookeepermaxwaitseconds=30
+	    fi
+	    
+	    zookeepermaxwaittimes=`expr ${zookeepermaxwaitseconds} \/ 30`
+	else
+	    zookeepermaxwaittimes=1
+	fi
+	
+	cd ${ZOOKEEPER_HOME}
+
+	zookeepercameup=0
+	    
+	zookeepernodes=`cat ${ZOOKEEPER_CONF_DIR}/zookeeper_slaves`
+        if ! type nc >/dev/null 2>&1
+        then
+            echo "Checking if zookeeper came up failed because netcat ('nc' command) was not found. Assuming success."
+            zookeepercameup=1
+        else 
+            for ((i = 1; i <= ${zookeepermaxwaittimes}; i++)); do
+            	
+                zookeeperbadresponse=0
+            
+                for zookeepernode in ${zookeepernodes}
+                do
+            	response=`echo ruok | nc ${zookeepernode} ${ZOOKEEPER_CLIENT_PORT}`
+            	if [ "${response}" != "imok" ]
+            	then
+            	    zookeeperbadresponse=1
+            	    break
+            	fi
+                done
+            
+                if [ "${zookeeperbadresponse}" == "0" ]
+                then
+            	zookeepercameup=1
+            	break
+                fi
+                
+                echo "Waiting 30 more seconds for Zookeeper daemons to come up"
+                sleep 30
+                totalsleepwait=`expr ${totalsleepwait} + 30`
+            done
+        fi  
+	
+	if [ "${zookeepercameup}" == "0" ]
+	then
+	    echo "Atleast 1 Zookeeper daemon never came up, setup problem or maybe need to increase MAGPIE_STARTUP_TIME"
+	    zookeeper_should_be_torndown=1
+	    zookeeper_setup_successful=0
+	    prior_setup_successful=false
+	else
+	    zookeeper_should_be_torndown=1
+	    zookeeper_setup_successful=1
+	fi
+    else
+	zookeeper_should_be_torndown=1
+	zookeeper_setup_successful=1
+    fi
+else
+    zookeeper_should_be_torndown=0
+    zookeeper_setup_successful=1
+fi
+
+#
+# Setup Hadoop
+#
+
+if [ "${HADOOP_SETUP}" == "yes" ] && [ "${prior_setup_successful}" == "true" ]
+then
+    hdfs_was_setup=0
+
+    cd ${HADOOP_HOME}
+
+    if [ ${HADOOP_MODE} != "setuponly" ]
+    then
+		echo "Starting hadoop"
+		hadoop_should_be_setup=1
+
+		if [ "$HADOOP_FILESYSTEM_MODE" == "hdfs" ] \
+		    || [ "$HADOOP_FILESYSTEM_MODE" == "hdfsoverlustre" ] \
+		    || [ "$HADOOP_FILESYSTEM_MODE" == "hdfsovernetworkfs" ]
+		then
+		    if [ "$HADOOP_FILESYSTEM_MODE" == "hdfsoverlustre" ] \
+			|| [ "$HADOOP_FILESYSTEM_MODE" == "hdfsovernetworkfs" ]
+		    then
+			if [ "$HADOOP_FILESYSTEM_MODE" == "hdfsoverlustre" ]
+			then
+			    hdfspath=${HADOOP_HDFSOVERLUSTRE_PATH}
+			else
+			    hdfspath=${HADOOP_HDFSOVERNETWORKFS_PATH}
+			fi
+
+	                if [ "${HADOOP_PER_JOB_HDFS_PATH}" == "yes" ]
+	                then
+	                    hdfspath="$hdfspath/${MAGPIE_JOB_ID}"
+	                fi
+
+			hdfsstoredversionpath=${hdfspath}/magpie.hadoop-version
+			hdfsstorednodecountpath=${hdfspath}/magpie.node-count
+
+			# Older versions of Magpie didn't store this variable
+			if [ -f ${hdfsstoredversionpath} ]
+			then
+			    hdfsstoredversion=`cat ${hdfsstoredversionpath}`
+
+			    # 0 is =, 1 is >, 2 is <
+			    Magpie_vercomp ${HADOOP_VERSION} ${hdfsstoredversion}
+			    vercomp_result=$?
+			    if [ "${vercomp_result}" != "0" ]
+			    then
+				if [ "${vercomp_result}" == "1" ]
+				then
+				    echo "**** HDFS Issue ****"
+				    echo "HDFS version at mount ${hdfspath} is older than ${HADOOP_VERSION}."
+				    if [ "${HADOOP_MODE}" != "upgradehdfs" ]
+				    then
+					echo "With newer Hadoop versions, you can upgrade HDFS via HADOOP_MODE=upgradehdfs"
+					echo "Or if you wish to use a newer Hadoop version without upgrading HDFS, you can setup HDFS on another path"
+				    fi
+				    echo "**** HDFS Issue ****"
+				else
+				    echo "**** HDFS Issue ****"
+				    echo "HDFS version at mount ${hdfspath} is newer than ${HADOOP_VERSION}."
+				    echo "Please use a newer Hadoop version."
+				    echo "Or if you wish to use an older Hadoop version, you can setup HDFS on another path"
+				    echo "**** HDFS Issue ****"
+				fi
+
+				# or ...vercomp_result == 1 && hadoop_mode == upgradehdfs
+				if [ "${vercomp_result}" != "1" ] || [ "${HADOOP_MODE}" != "upgradehdfs" ]
+				then
+				    hadoop_should_be_setup=0
+				fi
+			    fi
+			fi
+
+			# Older nodecounts of Magpie didn't store this variable
+			if [ -f ${hdfsstorednodecountpath} ]
+			then
+			    hdfsstorednodecount=`cat ${hdfsstorednodecountpath}`
+
+			    if [ "${HADOOP_SLAVE_COUNT}" -lt "${hdfsstorednodecount}" ]
+			    then
+				ninteypercentnodes=$(echo "${hdfsstorednodecount} * .9" | bc -l | xargs printf "%1.0f")
+				echo "**** HDFS Issue ****"
+				echo "HDFS was last built using a larger slave node count of ${hdfsstorednodecount}, compared to this job's ${HADOOP_SLAVE_COUNT}"
+				echo "Because of this, it is very likely the HDFS Namenode will not be able to find all HDFS blocks."
+
+				if [ "${HADOOP_SLAVE_COUNT}" -gt "${ninteypercentnodes}" ]
+				then
+				    echo "The current slave count of ${HADOOP_SLAVE_COUNT} is atleast 90% of ${hdfsstorednodecount}, so HDFS will attempt to be"
+				    echo "started.  However, it is not recommended for future runs and there is still a chance HDFS will not start."
+				else
+				    echo "If you truly desire to use fewer nodes, setup HDFS on another path or consider going through a decomissioning process to"
+				    echo "reduce the number of nodes your HDFS is built on.  See README for details on decomissioning process."
+				    hadoop_should_be_setup=0
+				fi
+				echo "**** HDFS Issue ****"
+			    fi
+			fi
+		    fi
+
+		    if [ "${MAGPIE_JOB_TYPE}" == "hadoop" ] && [ "${HADOOP_MODE}" == "upgradehdfs" ]
+		    then
+			startdfsoptions="-upgrade"
+		    fi
+
+		    if [ "${hadoop_should_be_setup}" == "1" ]
+		    then
+			# Make variables unspecified for launching
+			Magpie_make_all_local_dirs_unspecified
+
+			${hadoopsetupscriptprefix}/start-dfs.sh ${startdfsoptions}
+			hdfs_was_setup=1
+
+	                # Make variables specific now within Magpie
+			Magpie_make_all_local_dirs_node_specific
+		    fi
+
+		    if [ "${hdfs_was_setup}" == "1" ] \
+			&& ([ "$HADOOP_FILESYSTEM_MODE" == "hdfsoverlustre" ] \
+			    || [ "$HADOOP_FILESYSTEM_MODE" == "hdfsovernetworkfs" ])
+		    then
+			if [ "${HADOOP_MODE}" != "upgradehdfs" ]
+			then
+			    rm -f ${hdfsstoredversionpath}
+			    echo "${HADOOP_VERSION}" > ${hdfsstoredversionpath}
+			fi
+
+			if [ -f ${hdfsstorednodecountpath} ]
+	                then
+	                    nodecount=`cat ${hdfsstorednodecountpath}`
+			    if [ "${nodecount}" -lt "${HADOOP_SLAVE_COUNT}" ]
+			    then
+				nodecount=${HADOOP_SLAVE_COUNT}
+			    fi
+			else
+			    nodecount=${HADOOP_SLAVE_COUNT}
+			fi
+			rm -f ${hdfsstorednodecountpath}
+			echo "${nodecount}" > ${hdfsstorednodecountpath}
+		    fi
+		fi
+		
+		if [ "${hadoop_should_be_setup}" == "1" ]
+		then
+		    # Make variables unspecified for shutdown
+		    Magpie_make_all_local_dirs_unspecified
+
+		    if [ "${HADOOP_SETUP_TYPE}" == "MR1" ]
+		    then
+			${hadoopsetupscriptprefix}/start-mapred.sh
+		    fi
+		    
+		    if [ "${HADOOP_SETUP_TYPE}" == "MR2" ]
+		    then
+			${hadoopsetupscriptprefix}/start-yarn.sh
+		    fi
+
+	            # Make variables specific now within Magpie
+		    Magpie_make_all_local_dirs_node_specific
+		    
+	            # My rough estimate for setup time is 30 seconds per 128 nodes
+		    sleepwait=`expr ${HADOOP_SLAVE_COUNT} \/ 128 \* 30`
+		    if [ ${sleepwait} -lt 30 ]
+		    then
+			sleepwait=30
+		    fi
+		    echo "Waiting ${sleepwait} seconds to allows Hadoop daemons to setup"
+		    sleep ${sleepwait}
+		    totalsleepwait=`expr ${totalsleepwait} + ${sleepwait}`
+		fi
+    fi
+
+    echo "hadoop_should_be_setup:"$hadoop_should_be_setup
+
+    if [ "${hadoop_should_be_setup}" == "1" ]
+    then
+		echo "*******************************************************"
+		echo "*"
+		echo "* Hadoop Information"
+		echo "*"
+		echo "* You can view your Hadoop status by launching a web browser and pointing to ..."
+		echo "*"
+		if [ ${HADOOP_SETUP_TYPE}  == "MR1" ]
+		then
+		    echo "* Jobtracker: http://${HADOOP_MASTER_NODE}:${MAPRED_JOB_TRACKER_HTTPADDRESS}"
+		    echo "*"
+		elif [ ${HADOOP_SETUP_TYPE}  == "MR2" ]
+		then
+		    echo "* Yarn Resource Manager: http://${HADOOP_MASTER_NODE}:${YARN_RESOURCEMANAGER_WEBAPP_ADDRESS}"
+		    echo "*"
+		    echo "* Job History Server: http://${HADOOP_MASTER_NODE}:${HADOOP_JOBHISTORYSERVER_WEBAPP_ADDRESS}"
+		    echo "*"
+		fi
+
+		if [ ${HADOOP_FILESYSTEM_MODE} == "hdfs" ] \
+		    || [ ${HADOOP_FILESYSTEM_MODE} == "hdfsoverlustre" ] \
+		    || [ ${HADOOP_FILESYSTEM_MODE} == "hdfsovernetworkfs" ]
+		then
+		    if [ "${HDFS_FEDERATION_NAMENODE_COUNT}" -gt 1 ]
+		    then
+			for i in `seq 1 ${HDFS_FEDERATION_NAMENODE_COUNT}`
+			do
+		        # First namenode is based on master
+			    if [ "${i}" == "1" ]
+			    then
+				federationnamenodehost="${HADOOP_MASTER_NODE}"
+			    else
+				numline=`expr ${i} - 1`
+				federationnamenodehost=`sed -n "${numline}p" ${HADOOP_CONF_DIR}/namenode_hdfs_federation`
+			    fi
+		    	    echo "* HDFS Namenode ${i}: http://${federationnamenodehost}:${HADOOP_HDFS_NAMENODE_HTTPADDRESS}"
+			done
+		    else
+			echo "* HDFS Namenode: http://${HADOOP_MASTER_NODE}:${HADOOP_HDFS_NAMENODE_HTTPADDRESS}"
+		    fi
+		    echo "* HDFS DataNode: http://<DATANODE>:${HADOOP_HDFS_DATANODE_HTTPADDRESS}"
+		    echo "*"
+		    echo "* HDFS can be accessed directly at:"
+		    echo "*"
+		    if [ "${HDFS_FEDERATION_NAMENODE_COUNT}" -gt 1 ]
+		    then
+			for i in `seq 1 ${HDFS_FEDERATION_NAMENODE_COUNT}`
+			do
+		        # First namenode is based on master
+			    if [ "${i}" == "1" ]
+			    then
+				federationnamenodehost="${HADOOP_MASTER_NODE}"
+			    else
+				numline=`expr ${i} - 1`
+				federationnamenodehost=`sed -n "${numline}p" ${HADOOP_CONF_DIR}/namenode_hdfs_federation`
+			    fi
+		    	    echo "* hdfs://${federationnamenodehost}:${HADOOP_HDFS_NAMENODE_ADDRESS}"
+			done
+		    else
+			echo "*   hdfs://${HADOOP_MASTER_NODE}:${HADOOP_HDFS_NAMENODE_ADDRESS}" 
+		    fi
+		    echo "*" 
+		fi
+		echo "*" 
+		echo "* To access Hadoop directly, you'll want to:"
+		echo "*   ${MAGPIE_REMOTE_CMD:-ssh}${MAGPIE_REMOTE_CMD_OPTS:+" "}${MAGPIE_REMOTE_CMD_OPTS} ${HADOOP_MASTER_NODE}"
+		if echo $MAGPIE_SHELL | grep -q csh
+		then
+		    echo "*   setenv HADOOP_CONF_DIR \"${HADOOP_CONF_DIR}\""
+		else
+		    echo "*   export HADOOP_CONF_DIR=\"${HADOOP_CONF_DIR}\""
+		fi
+		echo "*   cd $HADOOP_HOME"
+		echo "*"
+		echo "* Then you can do as you please.  For example to interact with the Hadoop filesystem:"
+		echo "*" 
+		if echo ${HADOOP_VERSION} | grep -q -E "2\.[0-9]\.[0-9]"
+		then 
+		    echo "*   ${hadoopcmdprefix}/hdfs dfs ..."
+		    echo "*   or"
+		fi
+		echo "*   ${hadoopcmdprefix}/hadoop fs ..."
+		echo "*" 
+		echo "* To launch jobs you'll want to:"
+		echo "*" 
+		echo "*   ${hadoopcmdprefix}/hadoop jar ..."
+		echo "*" 
+		if [ "${PIG_SETUP}" == "yes" ] && [ "${PIG_MODE}" == "interactive" ]
+		then
+		    echo "*"
+		    echo "* To run pig scripts:"
+		    echo "*"
+		    echo "* cd $PIG_HOME"
+		    echo "* ${pigcmdprefix}/pig ..."
+		fi
+		if [ "${HADOOP_MODE}" == "setuponly" ]
+		then
+		    echo "*" 
+	 	    echo "* To setup, you probably want to run:" 
+		    echo "*"
+		    echo "*   ${MAGPIE_REMOTE_CMD:-ssh}${MAGPIE_REMOTE_CMD_OPTS:+" "}${MAGPIE_REMOTE_CMD_OPTS} ${HADOOP_MASTER_NODE}"
+		    if echo $MAGPIE_SHELL | grep -q csh
+		    then
+			echo "*   setenv HADOOP_CONF_DIR \"${HADOOP_CONF_DIR}\""
+		    else
+			echo "*   export HADOOP_CONF_DIR=\"${HADOOP_CONF_DIR}\""
+		    fi
+		    echo "*   cd $HADOOP_HOME"
+		    if [ "$HADOOP_FILESYSTEM_MODE" == "hdfs" ] \
+			|| [ "$HADOOP_FILESYSTEM_MODE" == "hdfsoverlustre" ] \
+			|| [ "$HADOOP_FILESYSTEM_MODE" == "hdfsovernetworkfs" ]
+		    then
+			echo "*   ${hadoopsetupscriptprefix}/start-dfs.sh" 
+		    fi
+		    if [ "${HADOOP_SETUP_TYPE}" == "MR1" ]
+		    then
+			echo "*   ${hadoopsetupscriptprefix}/start-mapred.sh"
+		    fi
+		    if [ "${HADOOP_SETUP_TYPE}" == "MR2" ]
+		    then
+			echo "*   ${hadoopsetupscriptprefix}/start-yarn.sh"
+		    fi
+		    if [ "${HADOOP_SETUP_TYPE}" == "MR1" ]
+		    then
+			echo "*   ${hadoopsetupscriptprefix}/start-jobhistoryserver.sh"
+		    fi
+		    if [ "${HADOOP_SETUP_TYPE}" == "MR2" ]
+		    then
+			echo "*   ${hadoopsetupscriptprefix}/mr-jobhistory-daemon.sh start historyserver"
+		    fi
+		fi
+
+		echo "*" 
+		echo "* To end/cleanup your session, kill the daemons via:"
+		echo "*" 
+		echo "*   ${MAGPIE_REMOTE_CMD:-ssh}${MAGPIE_REMOTE_CMD_OPTS:+" "}${MAGPIE_REMOTE_CMD_OPTS} ${HADOOP_MASTER_NODE}"
+		if echo $MAGPIE_SHELL | grep -q csh
+		then
+		    echo "*   setenv HADOOP_CONF_DIR \"${HADOOP_CONF_DIR}\""
+		else
+		    echo "*   export HADOOP_CONF_DIR=\"${HADOOP_CONF_DIR}\""
+		fi
+		echo "*   cd $HADOOP_HOME"
+		if [ "${HADOOP_SETUP_TYPE}" == "MR1" ]
+		then
+		    echo "*   ${hadoopsetupscriptprefix}/stop-mapred.sh"
+		fi
+		if [ "${HADOOP_SETUP_TYPE}" == "MR2" ]
+		then
+		    echo "*   ${hadoopsetupscriptprefix}/stop-yarn.sh"
+		fi
+		if [ "$HADOOP_FILESYSTEM_MODE" == "hdfs" ] \
+		    || [ "$HADOOP_FILESYSTEM_MODE" == "hdfsoverlustre" ] \
+		    || [ "$HADOOP_FILESYSTEM_MODE" == "hdfsovernetworkfs" ]
+		then
+		    echo "*   ${hadoopsetupscriptprefix}/stop-dfs.sh"
+		fi
+		if [ "${HADOOP_SETUP_TYPE}" == "MR1" ]
+		then
+		    echo "*   ${hadoopsetupscriptprefix}/stop-jobhistoryserver.sh"
+		fi
+		if [ "${HADOOP_SETUP_TYPE}" == "MR2" ]
+		then
+		    echo "*   ${hadoopsetupscriptprefix}/mr-jobhistory-daemon.sh stop historyserver"
+		fi
+		echo "*" 
+		echo "* Some additional environment variables you may sometimes wish to set"
+		echo "*" 
+		if echo $MAGPIE_SHELL | grep -q csh
+		then
+		    echo "*   setenv JAVA_HOME \"${JAVA_HOME}\""
+		    echo "*   setenv HADOOP_HOME \"${HADOOP_HOME}\""
+		    if [ "${MAGPIE_NO_LOCAL_DIR}" == "yes" ]
+		    then
+			echo "*   setenv HADOOP_CLIENT_OPTS \"-Djava.io.tmpdir=${HADOOP_LOCAL_SCRATCH_DIR} -XX:-UsePerfData\"" 
+		    fi
+		else
+		    echo "*   export JAVA_HOME=\"${JAVA_HOME}\""
+		    echo "*   export HADOOP_HOME=\"${HADOOP_HOME}\""
+		    if [ "${MAGPIE_NO_LOCAL_DIR}" == "yes" ]
+		    then
+			echo "*   export HADOOP_CLIENT_OPTS=\"-Djava.io.tmpdir=${HADOOP_LOCAL_SCRATCH_DIR} -XX:-UsePerfData\"" 
+		    fi
+		fi
+		if [ "${PIG_SETUP}" == "yes" ]
+		then
+		    if [ "${PIG_OPTS}X" != "X" ]
+		    then
+			if ! echo ${PIG_OPTS} | grep -q -E "java.io.tmpdir"
+			then
+			    export PIG_OPTS="${PIG_OPTS} -Djava.io.tmpdir=${PIG_LOCAL_SCRATCH_DIR}/tmp"
+			fi
+		    else
+			export PIG_OPTS="-Djava.io.tmpdir=${PIG_LOCAL_SCRATCH_DIR}/tmp"
+		    fi
+
+		    if echo $MAGPIE_SHELL | grep -q csh
+		    then
+			echo "*   setenv PIG_HOME \"${PIG_HOME}\""
+			echo "*   setenv PIG_CONF_DIR \"${PIG_CONF_DIR}\""
+			if [ "${PIG_OPTS}X" != "X" ]
+			then
+			    echo "*   setenv PIG_OPTS \"${PIG_OPTS}\""
+			fi
+		    else
+			echo "*   export PIG_HOME=\"${PIG_HOME}\""
+			echo "*   export PIG_CONF_DIR=\"${PIG_CONF_DIR}\""
+			if [ "${PIG_OPTS}X" != "X" ]
+			then
+			    echo "*   export PIG_OPTS=\"${PIG_OPTS}\""
+			fi
+		    fi
+		fi
+
+		if [ "${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}X" != "X" ]
+		then
+		    echo "*"
+		    echo "* If running interactively, sourcing"
+		    echo "*"
+		    echo "* ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}"
+		    echo "*"
+		    echo "* will set most common environment variables for your job."
+		fi
+		echo "*" 
+		echo "*******************************************************"
+
+		if [ "${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}X" != "X" ]
+		then
+		    if echo $MAGPIE_SHELL | grep -q csh
+		    then
+			echo "setenv HADOOP_HOME \"${HADOOP_HOME}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+			echo "setenv HADOOP_CONF_DIR \"${HADOOP_CONF_DIR}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+			echo "setenv HADOOP_LOG_DIR \"${HADOOP_LOG_DIR}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+			echo "setenv HADOOP_MASTER_NODE \"${HADOOP_MASTER_NODE}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+			echo "setenv HADOOP_SLAVE_COUNT \"${HADOOP_SLAVE_COUNT}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+			echo "setenv HADOOP_SLAVE_CORE_COUNT \"${HADOOP_SLAVE_CORE_COUNT}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+			echo "setenv HADOOP_NAMENODE \"${HADOOP_NAMENODE}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+			echo "setenv HADOOP_NAMENODE_PORT \"${HADOOP_NAMENODE_PORT}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+			if [ "${HADOOP_VERSION}X" != "X" ]
+			then
+			    echo "setenv HADOOP_VERSION \"${HADOOP_VERSION}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+			fi
+			if [ "${MAGPIE_NO_LOCAL_DIR}" == "yes" ]
+			then
+			    echo "setenv HADOOP_CLIENT_OPTS \"-Djava.io.tmpdir=${HADOOP_LOCAL_SCRATCH_DIR} -XX:-UsePerfData\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT} 
+			fi
+		    else
+			echo "export HADOOP_HOME=\"${HADOOP_HOME}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+			echo "export HADOOP_CONF_DIR=\"${HADOOP_CONF_DIR}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+			echo "export HADOOP_LOG_DIR=\"${HADOOP_LOG_DIR}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+			echo "export HADOOP_MASTER_NODE=\"${HADOOP_MASTER_NODE}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+			echo "export HADOOP_SLAVE_COUNT=\"${HADOOP_SLAVE_COUNT}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+			echo "export HADOOP_SLAVE_CORE_COUNT=\"${HADOOP_SLAVE_CORE_COUNT}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+			echo "export HADOOP_NAMENODE=\"${HADOOP_NAMENODE}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+			echo "export HADOOP_NAMENODE_PORT=\"${HADOOP_NAMENODE_PORT}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+			if [ "${HADOOP_VERSION}X" != "X" ]
+			then
+			    echo "export HADOOP_VERSION=\"${HADOOP_VERSION}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+			fi
+			if [ "${MAGPIE_NO_LOCAL_DIR}" == "yes" ]
+			then
+			    echo "export HADOOP_CLIENT_OPTS=\"-Djava.io.tmpdir=${HADOOP_LOCAL_SCRATCH_DIR} -XX:-UsePerfData\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+			fi
+		    fi
+		    echo "" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+
+		    if [ "${PIG_SETUP}" == "yes" ]
+		    then
+			if echo $MAGPIE_SHELL | grep -q csh
+			then
+			    echo "setenv PIG_HOME \"${PIG_HOME}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+			    echo "setenv PIG_CONF_DIR \"${PIG_CONF_DIR}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+			    if [ "${PIG_OPTS}X" != "X" ]
+			    then
+				echo "setenv PIG_OPTS \"${PIG_OPTS}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+			    fi
+			else
+			    echo "export PIG_HOME=\"${PIG_HOME}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+			    echo "export PIG_CONF_DIR=\"${PIG_CONF_DIR}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+			    if [ "${PIG_OPTS}X" != "X" ]
+			    then
+				echo "export PIG_OPTS=\"${PIG_OPTS}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+			    fi
+			fi
+		    fi
+		    echo "" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+		fi
+    fi
+
+    # Ensure namenode isn't in safe mode.
+    #
+    # We do not use "-safemode wait", b/c we want to inform the user
+    # as we're waiting.
+    if [ ${HADOOP_MODE} != "setuponly" ] \
+	&& ([ "$HADOOP_FILESYSTEM_MODE" == "hdfs" ] \
+	|| [ "$HADOOP_FILESYSTEM_MODE" == "hdfsoverlustre" ] \
+	|| [ "$HADOOP_FILESYSTEM_MODE" == "hdfsovernetworkfs" ])
+    then
+		if [ "${hdfs_was_setup}" == "1" ]
+		then
+		    magpiestartuptimeseconds=`expr ${MAGPIE_STARTUP_TIME} \* 60`
+
+		    if [ "${totalsleepwait}" -lt "${magpiestartuptimeseconds}" ]
+		    then  
+		        # Could be more dynamic w/ slurm call to determine current
+		        # run time, but probably is sufficient for this trivial
+		        # part.  Minimally, have to leave the totalsleepwait code
+		        # around for non-slurm systems.
+			namenodemaxwaitseconds=`expr ${magpiestartuptimeseconds} - ${totalsleepwait}`
+		    
+			if [ "${namenodemaxwaitseconds}" -lt 30 ]
+			then
+			    namenodemaxwaitseconds=30
+			fi
+		    
+			namenodemaxwaittimes=`expr ${namenodemaxwaitseconds} \/ 30`
+		    else
+			namenodemaxwaittimes=1
+		    fi
+		
+		    cd ${HADOOP_HOME}
+
+		    exittedsafemode=0
+		    
+		    for ((i = 1; i <= ${namenodemaxwaittimes}; i++)); do
+			
+			if [ "${HDFS_FEDERATION_NAMENODE_COUNT}" -gt 1 ]
+			then
+			    exittedsafemodeflag=1
+
+			    for i in `seq 1 ${HDFS_FEDERATION_NAMENODE_COUNT}`
+			    do
+				
+		                # First namenode is based on master
+				if [ "${i}" == "1" ]
+				then
+				    federationnamenodehost="${HADOOP_MASTER_NODE}"
+				else
+				    numline=`expr ${i} - 1`
+				    federationnamenodehost=`sed -n "${numline}p" ${HADOOP_CONF_DIR}/namenode_hdfs_federation`
+				fi
+
+				${hadoopcmdprefix}/${dfsadminscript} dfsadmin -fs hdfs://${federationnamenodehost}:${HADOOP_HDFS_NAMENODE_ADDRESS} -safemode get 2>&1 | grep -q -i "off"
+				if [ $? -ne 0 ]
+				then
+				    exittedsafemodeflag=0
+				fi
+			    done
+
+			    if [ "${exittedsafemodeflag}" == "1" ]
+			    then
+				exittedsafemode=1
+				break
+			    fi
+			else
+			    ${hadoopcmdprefix}/${dfsadminscript} dfsadmin -safemode get 2>&1 | grep -q -i "off"
+			    if [ $? -eq 0 ]
+			    then
+				exittedsafemode=1
+				break
+			    fi
+			fi
+
+			echo "Waiting 30 more seconds for namenode to exit safe mode"
+			sleep 30
+			totalsleepwait=`expr ${totalsleepwait} + 30`
+		    done
+		    
+		    if [ "${exittedsafemode}" == "0" ]
+		    then
+				echo "Namenode never exited safe mode, setup problem or maybe need to increase MAGPIE_STARTUP_TIME"
+				hadoop_should_be_torndown=1
+				hadoop_setup_successful=0
+				prior_setup_successful=false
+		    else
+				hadoop_should_be_torndown=0
+				hadoop_setup_successful=1
+		    fi
+		else
+		    hadoop_should_be_torndown=1
+		    hadoop_setup_successful=0
+		    prior_setup_successful=false
+		fi
+    else
+		hadoop_should_be_torndown=0
+		hadoop_setup_successful=1
+	fi
+
+    # Setup job history server after namenode comes up, it may need to
+    # write/create in HDFS
+    if [ ${HADOOP_MODE} != "setuponly" ] && [ "${hadoop_setup_successful}" == "1" ]
+    then
+		if [ "${HADOOP_SETUP_TYPE}" == "MR1" ]
+		then
+		    ${hadoopsetupscriptprefix}/start-jobhistoryserver.sh
+		fi
+	
+		if [ "${HADOOP_SETUP_TYPE}" == "MR2" ]
+		then
+		    ${hadoopsetupscriptprefix}/mr-jobhistory-daemon.sh start historyserver
+		fi
+    fi
+else
+    hadoop_should_be_torndown=0
+    hadoop_setup_successful=1
+fi
+
+#
+# Setup Hbase 
+#
+
+if [ "${HBASE_SETUP}" == "yes" ] && [ "${prior_setup_successful}" == "true" ]
+then
+    cd ${HBASE_HOME}
+
+    if [ ${HBASE_MODE} != "setuponly" ]
+    then
+        # Make variables unspecified for launching
+	Magpie_make_all_local_dirs_unspecified
+
+	echo "Starting hbase"
+	${hbasesetupscriptprefix}/start-hbase.sh
+        if [ "${HBASE_START_THRIFT_SERVER}" == "yes" ]
+        then
+            ${hbasesetupscriptprefix}/hbase-daemon.sh start thrift -threadpool
+        fi
+
+        # Make variables specific now within Magpie
+	Magpie_make_all_local_dirs_node_specific
+
+        # My rough estimate for setup time is 30 seconds per 128 nodes
+	sleepwait=`expr ${HBASE_REGIONSERVER_COUNT} \/ 128 \* 30`
+	if [ ${sleepwait} -lt 30 ]
+	then
+            sleepwait=30
+	fi
+	echo "Waiting ${sleepwait} seconds to allow Hbase daemons to setup"
+	sleep ${sleepwait}
+	totalsleepwait=`expr ${totalsleepwait} + ${sleepwait}`
+    fi
+
+    echo "*******************************************************"
+    echo "*"
+    echo "* Hbase Information"
+    echo "*"
+    echo "* You can view your Hbase status by launching a web browser and pointing to ..."
+    echo "*"
+    echo "* Hbase Master: http://${HBASE_MASTER_NODE}:${HBASE_MASTER_INFO_PORT}"
+    echo "* Hbase RegionServer: http://<REGIONSERVER>:${HBASE_REGIONSERVER_INFO_PORT}"
+    echo "*" 
+    echo "* To access Hbase directly, you'll want to:"
+    echo "*   ${MAGPIE_REMOTE_CMD:-ssh}${MAGPIE_REMOTE_CMD_OPTS:+" "}${MAGPIE_REMOTE_CMD_OPTS} ${HBASE_MASTER_NODE}"
+    if echo $MAGPIE_SHELL | grep -q csh
+    then
+	echo "*   setenv HBASE_CONF_DIR \"${HBASE_CONF_DIR}\""
+    else
+	echo "*   export HBASE_CONF_DIR=\"${HBASE_CONF_DIR}\""
+    fi
+    echo "*   cd $HBASE_HOME"
+    echo "*"
+    echo "* Then you can do as you please.  For example to interact in the Hbase shell :"
+    echo "*" 
+    echo "*   ${hbasecmdprefix}/hbase shell"
+
+    if [ "${HBASE_MODE}" == "setuponly" ]
+    then
+	echo "*" 
+	echo "* To setup, you probably want to run:" 
+	echo "*"
+	echo "*   ${MAGPIE_REMOTE_CMD:-ssh}${MAGPIE_REMOTE_CMD_OPTS:+" "}${MAGPIE_REMOTE_CMD_OPTS} ${HBASE_MASTER_NODE}"
+	if echo $MAGPIE_SHELL | grep -q csh
+	then
+	    echo "*   setenv HBASE_CONF_DIR \"${HBASE_CONF_DIR}\""
+	else
+	    echo "*   export HBASE_CONF_DIR=\"${HBASE_CONF_DIR}\""
+	fi
+	echo "*   cd $HBASE_HOME"
+	echo "*   ${hbasesetupscriptprefix}/start-hbase.sh" 
+    fi
+
+    echo "*" 
+    echo "* To end/cleanup your session, kill the daemons via:"
+    echo "*" 
+    echo "*   ${MAGPIE_REMOTE_CMD:-ssh}${MAGPIE_REMOTE_CMD_OPTS:+" "}${MAGPIE_REMOTE_CMD_OPTS} ${HBASE_MASTER_NODE}"
+    if echo $MAGPIE_SHELL | grep -q csh
+    then
+	echo "*   setenv HBASE_CONF_DIR \"${HBASE_CONF_DIR}\""
+    else
+	echo "*   export HBASE_CONF_DIR=\"${HBASE_CONF_DIR}\""
+    fi
+    echo "*   cd $HBASE_HOME"
+    echo "*   ${hbasesetupscriptprefix}/stop-hbase.sh"
+    echo "*" 
+    echo "* Some additional environment variables you may sometimes wish to set"
+    echo "*" 
+    if echo $MAGPIE_SHELL | grep -q csh
+    then
+	echo "*   setenv JAVA_HOME \"${JAVA_HOME}\""
+	echo "*   setenv HBASE_HOME \"${HBASE_HOME}\""
+    else
+	echo "*   export JAVA_HOME=\"${JAVA_HOME}\""
+	echo "*   export HBASE_HOME=\"${HBASE_HOME}\""
+    fi
+
+    if [ "${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}X" != "X" ]
+    then
+	echo "*"
+	echo "* If running interactively, sourcing"
+	echo "*"
+	echo "* ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}"
+	echo "*"
+	echo "* will set most common environment variables for your job."
+    fi
+    echo "*" 
+    echo "*******************************************************"
+
+    if [ "${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}X" != "X" ]
+    then
+	if echo $MAGPIE_SHELL | grep -q csh
+	then
+	    echo "setenv HBASE_HOME \"${HBASE_HOME}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    echo "setenv HBASE_CONF_DIR \"${HBASE_CONF_DIR}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    echo "setenv HBASE_LOG_DIR \"${HBASE_LOG_DIR}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    echo "setenv HBASE_MASTER_NODE \"${HBASE_MASTER_NODE}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    echo "setenv HBASE_REGIONSERVER_COUNT \"${HBASE_REGIONSERVER_COUNT}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    if [ "${HBASE_VERSION}X" != "X" ]
+	    then
+		echo "setenv HBASE_VERSION \"${HBASE_VERSION}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    fi
+	else
+	    echo "export HBASE_HOME=\"${HBASE_HOME}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    echo "export HBASE_CONF_DIR=\"${HBASE_CONF_DIR}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    echo "export HBASE_LOG_DIR=\"${HBASE_LOG_DIR}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    echo "export HBASE_MASTER_NODE=\"${HBASE_MASTER_NODE}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    echo "export HBASE_REGIONSERVER_COUNT=\"${HBASE_REGIONSERVER_COUNT}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    if [ "${HBASE_VERSION}X" != "X" ]
+	    then
+		echo "export HBASE_VERSION=\"${HBASE_VERSION}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    fi
+	fi
+	echo "" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+    fi
+
+    if [ ${HBASE_MODE} != "setuponly" ]
+    then
+	magpiestartuptimeseconds=`expr ${MAGPIE_STARTUP_TIME} \* 60`
+
+	if [ "${totalsleepwait}" -lt "${magpiestartuptimeseconds}" ]
+	then  
+	    # Could be more dynamic w/ slurm call to determine current
+	    # run time, but probably is sufficient for this trivial
+	    # part.  Minimally, have to leave the totalsleepwait code
+	    # around for non-slurm systems.
+	    hbasemastermaxwaitseconds=`expr ${magpiestartuptimeseconds} - ${totalsleepwait}`
+	    
+	    if [ "${hbasemastermaxwaitseconds}" -lt 30 ]
+	    then
+		hbasemastermaxwaitseconds=30
+	    fi
+	    
+	    hbasemastermaxwaittimes=`expr ${hbasemastermaxwaitseconds} \/ 30`
+	else
+	    hbasemastermaxwaittimes=1
+	fi
+	
+	cd ${HBASE_HOME}
+
+	hbasemastercameup=0
+	    
+	for ((i = 1; i <= ${hbasemastermaxwaittimes}; i++)); do
+		
+	    # example output : "9 servers, 0 dead, 4.7778 average load"
+	    if echo status | ${hbasecmdprefix}/hbase shell | grep -q "servers"
+	    then
+		hbasemastercameup=1
+		break
+	    fi
+	    
+	    echo "Waiting 30 more seconds for Hbase master to come up"
+	    sleep 30
+	    totalsleepwait=`expr ${totalsleepwait} + 30`
+	done
+	
+	if [ "${hbasemastercameup}" == "0" ]
+	then
+	    echo "Hbase Master never came up, setup problem or maybe need to increase MAGPIE_STARTUP_TIME"
+	    hbase_should_be_torndown=1
+	    hbase_setup_successful=0
+	    prior_setup_successful=false
+	else
+	    hbase_should_be_torndown=1
+	    hbase_setup_successful=1
+	fi
+    else
+	hbase_should_be_torndown=1
+	hbase_setup_successful=1
+    fi
+else
+    hbase_should_be_torndown=0
+    hbase_setup_successful=1
+fi
+
+#
+# Setup Phoenix
+#
+
+if [ "${PHOENIX_SETUP}" == "yes" ] && [ "${prior_setup_successful}" == "true" ]
+then
+    cd ${PHOENIX_HOME}
+
+    if [ ${PHOENIX_MODE} == "server" ]
+    then
+        # Make variables unspecified for launching
+	Magpie_make_all_local_dirs_unspecified
+
+	echo "Starting Phoenix Queryserver"
+        ${MAGPIE_SCRIPTS_HOME}/bin/magpie-phoenix.sh start 
+	
+	Magpie_make_all_local_dirs_node_specific
+
+        # My rough estimate for setup time is 30 seconds
+        sleepwait=30
+
+	echo "Waiting ${sleepwait} seconds to allow Phoenix daemons to setup"
+	sleep ${sleepwait}
+	totalsleepwait=`expr ${totalsleepwait} + ${sleepwait}`
+    fi
+
+    echo "*******************************************************"
+    echo "*"
+    echo "* Phoenix Information"
+    echo "*"
+    echo "* To access phoenix directly, you'll want to:"
+    echo "*   ${MAGPIE_REMOTE_CMD:-ssh}${MAGPIE_REMOTE_CMD_OPTS:+" "}${MAGPIE_REMOTE_CMD_OPTS} ${HBASE_MASTER_NODE}"
+    if echo $MAGPIE_SHELL | grep -q csh
+    then
+	echo "*   setenv HBASE_CONF_DIR \"${HBASE_CONF_DIR}\""
+    else
+	echo "*   export HBASE_CONF_DIR=\"${HBASE_CONF_DIR}\""
+    fi
+    echo "*   cd $PHOENIX_HOME"
+    echo "*"
+    echo "* Then you can do as you please.  To interact with Phoenix you can use:"
+    echo "*" 
+    echo "*   ${phoenixcmdprefix}/sqlline.py"
+
+    echo "*" 
+    echo "* Some additional environment variables you may sometimes wish to set"
+    echo "*" 
+    if echo $MAGPIE_SHELL | grep -q csh
+    then
+	echo "*   setenv JAVA_HOME \"${JAVA_HOME}\""
+        echo "*   setenv PHOENIX_HOME=\"${PHOENIX_HOME}\""
+    else
+	echo "*   export JAVA_HOME=\"${JAVA_HOME}\""
+        echo "*   export PHOENIX_HOME=\"${PHOENIX_HOME}\""
+    fi
+
+    if [ "${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}X" != "X" ]
+    then
+	echo "*"
+	echo "* If running interactively, sourcing"
+	echo "*"
+	echo "* ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}"
+	echo "*"
+	echo "* will set most common environment variables for your job."
+    fi
+    echo "*" 
+    echo "*******************************************************"
+
+    if [ "${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}X" != "X" ]
+    then
+	if echo $MAGPIE_SHELL | grep -q csh
+	then
+            echo "setenv PHOENIX_HOME=\"${PHOENIX_HOME}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	else
+            echo "export PHOENIX_HOME=\"${PHOENIX_HOME}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	fi
+	echo "" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+    fi
+
+    if [ ${PHOENIX_MODE} == "server" ]
+    then
+	magpiestartuptimeseconds=`expr ${MAGPIE_STARTUP_TIME} \* 60`
+
+	if [ "${totalsleepwait}" -lt "${magpiestartuptimeseconds}" ]
+	then  
+	    # Could be more dynamic w/ slurm call to determine current
+	    # run time, but probably is sufficient for this trivial
+	    # part.  Minimally, have to leave the totalsleepwait code
+	    # around for non-slurm systems.
+	    phoenixmaxwaitseconds=`expr ${magpiestartuptimeseconds} - ${totalsleepwait}`
+	    
+	    if [ "${phoenixmaxwaitseconds}" -lt 30 ]
+	    then
+		phoenixmaxwaitseconds=30
+	    fi
+	    
+	    phoenixmaxwaittimes=`expr ${phoenixmaxwaitseconds} \/ 30`
+	else
+	    phoenixrmaxwaittimes=1
+	fi
+	
+	cd ${PHOENIX_HOME}
+
+	phoenixcameup=0
+	    
+	for ((i = 1; i <= ${phoenixmaxwaittimes}; i++)); do
+
+            serverschk=0
+            serversup=0
+            for server in `cat ${PHOENIX_CONF_DIR}/regionservers`;
+            do
+                serverschk=$((serverschk+1))
+                if [ $(${MAGPIE_REMOTE_CMD:-ssh} ${MAGPIE_REMOTE_CMD_OPTS} $server ps -ef | grep -c queryserver.py) -gt "0" ] ;
+                then 
+                    serversup=$((serversup+1))
+                fi
+            done
+
+            echo "$serversup/$serverschk Queryservers are up."
+            if [ "$serverschk" -eq "$serversup" ]
+            then 
+                phoenixcameup=1
+                break
+            fi
+
+	    echo "Waiting 30 more seconds for Queryservers to come up"
+	    sleep 30
+	    totalsleepwait=`expr ${totalsleepwait} + 30`
+	done
+	
+	if [ "${phoenixcameup}" == "0" ]
+	then
+	    echo "Not all Phoenix Queryservers came up, setup problem or maybe need to increase MAGPIE_STARTUP_TIME"
+	    phoenix_should_be_torndown=1
+	    phoenix_setup_successful=0
+	    prior_setup_successful=false
+	else
+	    phoenix_should_be_torndown=1
+	    phoenix_setup_successful=1
+	fi
+    else
+	phoenix_should_be_torndown=1
+	phoenix_setup_successful=1
+    fi
+else
+    phoenix_should_be_torndown=0
+    phoenix_setup_successful=1
+fi
+
+#
+# Setup Spark 
+#
+
+if [ "${SPARK_SETUP}" == "yes" ] && [ "${prior_setup_successful}" == "true" ]
+then
+    cd ${SPARK_HOME}
+
+    if [ ${SPARK_MODE} != "setuponly" ]
+    then
+	# Make variables unspecified for launching
+	Magpie_make_all_local_dirs_unspecified
+
+	echo "Starting spark"
+	${sparksetupscriptprefix}/start-all.sh
+
+        # Make variables specific now within Magpie
+	Magpie_make_all_local_dirs_node_specific
+	
+        # My rough estimate for setup time is 30 seconds per 128 nodes
+	sleepwait=`expr ${SPARK_SLAVE_COUNT} \/ 128 \* 30`
+	if [ ${sleepwait} -lt 30 ]
+	then
+            sleepwait=30
+	fi
+	echo "Waiting ${sleepwait} seconds to allow Spark daemons to setup"
+	sleep ${sleepwait}
+	totalsleepwait=`expr ${totalsleepwait} + ${sleepwait}`
+    fi
+
+    echo "*******************************************************"
+    echo "*"
+    echo "* Spark Information"
+    echo "*"
+    echo "* You can view your Spark status by launching a web browser and pointing to ..."
+    echo "*"
+    echo "* Spark Master: http://${SPARK_MASTER_NODE}:${SPARK_MASTER_WEBUI_PORT}"
+    echo "* Spark Worker: http://<WORKERNODE>:${SPARK_WORKER_WEBUI_PORT}"
+    echo "* Spark Application Dashboard: http://${SPARK_MASTER_NODE}:${SPARK_APPLICATION_DASHBOARD_PORT}"
+    echo "*" 
+    echo "* The Spark Master for running jobs is"
+    echo "*"
+    echo "* spark://${SPARK_MASTER_NODE}:${SPARK_MASTER_PORT}"
+    echo "*"
+    echo "* To access Spark directly, you'll want to:"
+    echo "*   ${MAGPIE_REMOTE_CMD:-ssh}${MAGPIE_REMOTE_CMD_OPTS:+" "}${MAGPIE_REMOTE_CMD_OPTS} ${SPARK_MASTER_NODE}"
+    if echo $MAGPIE_SHELL | grep -q csh
+    then
+	echo "*   setenv SPARK_CONF_DIR \"${SPARK_CONF_DIR}\""
+    else
+	echo "*   export SPARK_CONF_DIR=\"${SPARK_CONF_DIR}\""
+    fi
+    echo "*   cd $SPARK_HOME"
+    echo "*"
+    echo "* Then you can do as you please.  For example to run a job:"
+    echo "*" 
+    if echo ${SPARK_VERSION} | grep -q -E "0\.9\.[0-9]"
+    then 
+	echo "*   ${sparkcmdprefix}/spark-class <class> spark://${SPARK_MASTER_NODE}:${SPARK_MASTER_PORT}"
+    else
+	echo "*   ${sparkcmdprefix}/spark-submit --class <class> <jar>"
+    fi
+
+    if [ "${SPARK_MODE}" == "setuponly" ]
+    then
+	echo "*" 
+	echo "* To setup, you probably want to run:" 
+	echo "*"
+	echo "*   ${MAGPIE_REMOTE_CMD:-ssh}${MAGPIE_REMOTE_CMD_OPTS:+" "}${MAGPIE_REMOTE_CMD_OPTS} ${SPARK_MASTER_NODE}"
+	if echo $MAGPIE_SHELL | grep -q csh
+	then
+	    echo "*   setenv SPARK_CONF_DIR \"${SPARK_CONF_DIR}\""
+	else
+	echo "*   export SPARK_CONF_DIR=\"${SPARK_CONF_DIR}\""
+	fi
+	echo "*   cd $SPARK_HOME"
+	echo "*   ${sparksetupscriptprefix}/start-all.sh" 
+    fi
+
+    echo "*" 
+    echo "* To end/cleanup your session, kill the daemons via:"
+    echo "*" 
+    echo "*   ${MAGPIE_REMOTE_CMD:-ssh}${MAGPIE_REMOTE_CMD_OPTS:+" "}${MAGPIE_REMOTE_CMD_OPTS} ${SPARK_MASTER_NODE}"
+    if echo $MAGPIE_SHELL | grep -q csh
+    then
+	echo "*   setenv SPARK_CONF_DIR \"${SPARK_CONF_DIR}\""
+    else
+	echo "*   export SPARK_CONF_DIR=\"${SPARK_CONF_DIR}\""
+    fi
+    echo "*   cd $SPARK_HOME"
+    echo "*   ${sparksetupscriptprefix}/stop-all.sh"
+    echo "*" 
+    echo "* Some additional environment variables you may sometimes wish to set"
+    echo "*" 
+    if echo $MAGPIE_SHELL | grep -q csh
+    then
+	echo "*   setenv JAVA_HOME \"${JAVA_HOME}\""
+	echo "*   setenv SPARK_HOME \"${SPARK_HOME}\""
+    else
+	echo "*   export JAVA_HOME=\"${JAVA_HOME}\""
+	echo "*   export SPARK_HOME=\"${SPARK_HOME}\""
+    fi
+
+    if [ "${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}X" != "X" ]
+    then
+	echo "*"
+	echo "* If running interactively, sourcing"
+	echo "*"
+	echo "* ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}"
+	echo "*"
+	echo "* will set most common environment variables for your job."
+    fi
+    echo "*" 
+    echo "*******************************************************"
+
+    if [ "${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}X" != "X" ]
+    then
+	if echo $MAGPIE_SHELL | grep -q csh
+	then
+	    echo "setenv SPARK_HOME \"${SPARK_HOME}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    echo "setenv SPARK_CONF_DIR \"${SPARK_CONF_DIR}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    echo "setenv SPARK_LOG_DIR \"${SPARK_LOG_DIR}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    echo "setenv SPARK_MASTER_NODE \"${SPARK_MASTER_NODE}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    echo "setenv SPARK_MASTER_PORT \"${SPARK_MASTER_PORT}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    echo "setenv SPARK_SLAVE_COUNT \"${SPARK_SLAVE_COUNT}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    echo "setenv SPARK_SLAVE_CORE_COUNT \"${SPARK_SLAVE_CORE_COUNT}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    if [ "${SPARK_VERSION}X" != "X" ]
+	    then
+		echo "setenv SPARK_VERSION \"${SPARK_VERSION}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    fi
+	else
+	    echo "export SPARK_HOME=\"${SPARK_HOME}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    echo "export SPARK_CONF_DIR=\"${SPARK_CONF_DIR}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    echo "export SPARK_LOG_DIR=\"${SPARK_LOG_DIR}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    echo "export SPARK_MASTER_NODE=\"${SPARK_MASTER_NODE}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    echo "export SPARK_MASTER_PORT=\"${SPARK_MASTER_PORT}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    echo "export SPARK_SLAVE_COUNT=\"${SPARK_SLAVE_COUNT}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    echo "export SPARK_SLAVE_CORE_COUNT=\"${SPARK_SLAVE_CORE_COUNT}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    if [ "${SPARK_VERSION}X" != "X" ]
+	    then
+		echo "export SPARK_VERSION=\"${SPARK_VERSION}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    fi
+	fi
+	echo "" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+    fi
+
+    # Nothing to check for Spark, setup always passes
+    spark_should_be_torndown=1
+    spark_setup_successful=1
+else
+    spark_should_be_torndown=0
+    spark_setup_successful=1
+fi
+
+#
+# Setup Storm
+#
+
+if [ "${STORM_SETUP}" == "yes" ] && [ "${prior_setup_successful}" == "true" ]
+then
+    if [ ${STORM_MODE} != "setuponly" ]
+    then
+	# Make variables unspecified for launching
+	Magpie_make_all_local_dirs_unspecified
+
+	echo "Starting storm"
+	${MAGPIE_SCRIPTS_HOME}/bin/magpie-storm.sh start
+	
+	# Make variables specific now within Magpie
+	Magpie_make_all_local_dirs_node_specific
+
+        # My rough estimate for setup time is 30 seconds per 128 nodes
+	sleepwait=`expr ${STORM_WORKERS_COUNT} \/ 128 \* 30`
+	if [ ${sleepwait} -lt 30 ]
+	then
+            sleepwait=30
+	fi
+	echo "Waiting ${sleepwait} seconds to allow Storm daemons to setup"
+	sleep ${sleepwait}
+	totalsleepwait=`expr ${totalsleepwait} + ${sleepwait}`
+    fi
+
+    echo "*******************************************************"
+    echo "*"
+    echo "* Storm Information"
+    echo "*"
+    echo "* You can view your Storm status by launching a web browser and pointing to ..."
+    echo "*"
+    echo "* Storm UI: http://${STORM_MASTER_NODE}:${STORM_UI_PORT}"
+    echo "*" 
+    echo "* To access Storm directly, you'll want to:"
+    echo "*   ${MAGPIE_REMOTE_CMD:-ssh}${MAGPIE_REMOTE_CMD_OPTS:+" "}${MAGPIE_REMOTE_CMD_OPTS} ${STORM_MASTER_NODE}"
+    if echo $MAGPIE_SHELL | grep -q csh
+    then
+	echo "*   setenv STORM_CONF_DIR \"${STORM_CONF_DIR}\""
+    else
+	echo "*   export STORM_CONF_DIR=\"${STORM_CONF_DIR}\""
+    fi
+    echo "*   cd $STORM_HOME"
+    echo "*"
+    echo "* Then you can do as you please.  For example to run a job:"
+    echo "*" 
+    echo "*   ${stormcmdprefix}/storm jar ..."
+    echo "*" 
+
+    if [ "${STORM_MODE}" == "setuponly" ]
+    then
+ 	echo "* To setup, you probably want to run:" 
+	echo "*"
+	echo "*   ${MAGPIE_REMOTE_CMD:-ssh}${MAGPIE_REMOTE_CMD_OPTS:+" "}${MAGPIE_REMOTE_CMD_OPTS} ${STORM_MASTER_NODE}"
+	if echo $MAGPIE_SHELL | grep -q csh
+	then
+	    echo "*   setenv STORM_CONF_DIR \"${STORM_CONF_DIR}\""
+	else
+	    echo "*   export STORM_CONF_DIR=\"${STORM_CONF_DIR}\""
+	fi
+	echo "*   cd $MAGPIE_SCRIPTS_HOME"
+	echo "*   bin/magpie-storm.sh start"
+	echo "*" 
+    fi
+
+    echo "* To end/cleanup your session, kill the daemons via:"
+    echo "*" 
+    echo "*   ${MAGPIE_REMOTE_CMD:-ssh}${MAGPIE_REMOTE_CMD_OPTS:+" "}${MAGPIE_REMOTE_CMD_OPTS} ${STORM_MASTER_NODE}"
+    if echo $MAGPIE_SHELL | grep -q csh
+    then
+	echo "*   setenv STORM_CONF_DIR \"${STORM_CONF_DIR}\""
+    else
+	echo "*   export STORM_CONF_DIR=\"${STORM_CONF_DIR}\""
+    fi
+    echo "*   cd $MAGPIE_SCRIPTS_HOME"
+    echo "*   bin/magpie-storm.sh stop"
+    echo "*" 
+    echo "* Some additional environment variables you may sometimes wish to set"
+    echo "*" 
+    if echo $MAGPIE_SHELL | grep -q csh
+    then
+	echo "*   setenv JAVA_HOME \"${JAVA_HOME}\""
+	echo "*   setenv STORM_HOME \"${STORM_HOME}\""
+	if [ "${MAGPIE_NO_LOCAL_DIR}" == "yes" ]
+	then
+	    echo "*   setenv STORM_JAR_JVM_OPTS \"-Djava.io.tmpdir=${STORM_LOCAL_SCRATCH_DIR} -XX:-UsePerfData\"" 
+	fi
+    else
+	echo "*   export JAVA_HOME=\"${JAVA_HOME}\""
+	echo "*   export STORM_HOME=\"${STORM_HOME}\""
+	if [ "${MAGPIE_NO_LOCAL_DIR}" == "yes" ]
+	then
+	    echo "*   export STORM_JAR_JVM_OPTS=\"-Djava.io.tmpdir=${STORM_LOCAL_SCRATCH_DIR} -XX:-UsePerfData\"" 
+	fi
+    fi
+
+    if [ "${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}X" != "X" ]
+    then
+	echo "*"
+	echo "* If running interactively, sourcing"
+	echo "*"
+	echo "* ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}"
+	echo "*"
+	echo "* will set most common environment variables for your job."
+    fi
+    echo "*" 
+    echo "*******************************************************"
+
+    if [ "${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}X" != "X" ]
+    then
+	if echo $MAGPIE_SHELL | grep -q csh
+	then
+	    echo "setenv STORM_HOME \"${STORM_HOME}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    echo "setenv STORM_CONF_DIR \"${STORM_CONF_DIR}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    echo "setenv STORM_LOG_DIR \"${STORM_LOG_DIR}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    echo "setenv STORM_MASTER_NODE \"${STORM_MASTER_NODE}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    echo "setenv STORM_NIMBUS_HOST \"${STORM_NIMBUS_HOST}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    echo "setenv STORM_WORKERS_COUNT \"${STORM_WORKERS_COUNT}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    if [ "${STORM_VERSION}X" != "X" ]
+	    then
+		echo "setenv STORM_VERSION \"${STORM_VERSION}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    fi
+	    if [ "${MAGPIE_NO_LOCAL_DIR}" == "yes" ]
+	    then
+		echo "setenv STORM_JAR_JVM_OPTS \"-Djava.io.tmpdir=${STORM_LOCAL_SCRATCH_DIR} -XX:-UsePerfData\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT} 
+	    fi
+	else
+	    echo "export STORM_HOME=\"${STORM_HOME}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    echo "export STORM_CONF_DIR=\"${STORM_CONF_DIR}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    echo "export STORM_LOG_DIR=\"${STORM_LOG_DIR}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    echo "export STORM_MASTER_NODE=\"${STORM_MASTER_NODE}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    echo "export STORM_NIMBUS_HOST=\"${STORM_NIMBUS_HOST}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    echo "export STORM_WORKERS_COUNT=\"${STORM_WORKERS_COUNT}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    if [ "${STORM_VERSION}X" != "X" ]
+	    then
+		echo "export STORM_VERSION=\"${STORM_VERSION}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    fi
+	    if [ "${MAGPIE_NO_LOCAL_DIR}" == "yes" ]
+	    then
+		echo "export STORM_JAR_JVM_OPTS=\"-Djava.io.tmpdir=${STORM_LOCAL_SCRATCH_DIR} -XX:-UsePerfData\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    fi
+	fi
+	echo "" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+    fi
+
+    if [ ${STORM_MODE} != "setuponly" ]
+    then
+	magpiestartuptimeseconds=`expr ${MAGPIE_STARTUP_TIME} \* 60`
+
+	if [ "${totalsleepwait}" -lt "${magpiestartuptimeseconds}" ]
+	then  
+	    # Could be more dynamic w/ slurm call to determine current
+	    # run time, but probably is sufficient for this trivial
+	    # part.  Minimally, have to leave the totalsleepwait code
+	    # around for non-slurm systems.
+	    stormmastermaxwaitseconds=`expr ${magpiestartuptimeseconds} - ${totalsleepwait}`
+	    
+	    if [ "${stormmastermaxwaitseconds}" -lt 30 ]
+	    then
+		stormmastermaxwaitseconds=30
+	    fi
+	    
+	    stormmastermaxwaittimes=`expr ${stormmastermaxwaitseconds} \/ 30`
+	else
+	    stormmastermaxwaittimes=1
+	fi
+	
+	cd ${STORM_HOME}
+
+	stormmastercameup=0
+	    
+	for ((i = 1; i <= ${stormmastermaxwaittimes}; i++)); do
+		
+	    # example output : "No topologies running"
+	    if ${stormcmdprefix}/storm list | grep -q "No topologies running"
+	    then
+		stormmastercameup=1
+		break
+	    fi
+	    
+	    echo "Waiting 30 more seconds for Storm nimbus to come up"
+	    sleep 30
+	    totalsleepwait=`expr ${totalsleepwait} + 30`
+	done
+	
+	if [ "${stormnimbuscameup}" == "0" ]
+	then
+	    echo "Storm Nimbus never came up, setup problem or maybe need to increase MAGPIE_STARTUP_TIME"
+	    storm_should_be_torndown=1
+	    storm_setup_successful=0
+	    prior_setup_successful=false
+	else
+	    storm_should_be_torndown=1
+	    storm_setup_successful=1
+	fi
+    else
+	storm_should_be_torndown=1
+	storm_setup_successful=1
+    fi
+else
+    storm_should_be_torndown=0
+    storm_setup_successful=1
+fi
+
+#
+# Setup Tachyon
+#
+
+if [ "${TACHYON_SETUP}" == "yes" ] && [ "${prior_setup_successful}" == "true" ]
+then
+    cd ${TACHYON_HOME}
+
+    if [ ${TACHYON_MODE} != "setuponly" ]
+    then
+	# Must be done here instead of in magpie-setup-tachyon, b/c
+	# if Hadoop is setup, the format needs to contact HDFS
+	if [ "${TACHYON_JOURNAL_FOLDER}X" == "X" ]
+	then
+	    tachyonformat=1
+	else
+	    if [ ! -d "${TACHYON_JOURNAL_FOLDER}" ]
+	    then
+		tachyonformat=1
+
+		mkdir -p ${TACHYON_JOURNAL_FOLDER}
+		if [ $? -ne 0 ] ; then
+		    echo "mkdir failed making ${TACHYON_JOURNAL_FOLDER}"
+		    exit 1
+		fi
+	    else
+		tachyonformat=0
+	    fi
+	fi
+
+	if [ "${tachyonformat}" == "1" ]
+	then
+	    echo "*******************************************************"
+	    echo "* Formatting Tachyon"
+	    echo "*******************************************************"
+	    ${tachyoncmdprefix}/tachyon format
+
+            # My rough estimate for setup time is 15 seconds per 128 nodes
+	    sleepwait=`expr ${TACHYON_SLAVE_COUNT} \/ 128 \* 15`
+	    if [ ${sleepwait} -lt 15 ]
+	    then
+		sleepwait=15
+	    fi
+	    echo "Waiting ${sleepwait} seconds to allow Tachyon format to complete"
+	    sleep ${sleepwait}
+	    totalsleepwait=`expr ${totalsleepwait} + ${sleepwait}`
+	fi
+
+	echo "Starting tachyon"
+	${tachyoncmdprefix}/tachyon-start.sh -N all NoMount
+	
+        # My rough estimate for setup time is 30 seconds per 128 nodes
+	sleepwait=`expr ${TACHYON_SLAVE_COUNT} \/ 128 \* 30`
+	if [ ${sleepwait} -lt 30 ]
+	then
+            sleepwait=30
+	fi
+	echo "Waiting ${sleepwait} seconds to allow Tachyon daemons to setup"
+	sleep ${sleepwait}
+	totalsleepwait=`expr ${totalsleepwait} + ${sleepwait}`
+    fi
+
+    echo "*******************************************************"
+    echo "*"
+    echo "* Tachyon Information"
+    echo "*"
+    echo "* You can view your Tachyon status by launching a web browser and pointing to ..."
+    echo "*"
+    echo "* Tachyon UI: http://${TACHYON_MASTER_NODE}:${TACHYON_MASTER_WEB_PORT}"
+    echo "*" 
+    echo "* To access Tachyon directly, you'll most likely want to:"
+    echo "*   ${MAGPIE_REMOTE_CMD:-ssh}${MAGPIE_REMOTE_CMD_OPTS:+" "}${MAGPIE_REMOTE_CMD_OPTS} <WORKERNODE>"
+    if echo $MAGPIE_SHELL | grep -q csh
+    then
+	echo "*   setenv TACHYON_CONF_DIR \"${TACHYON_CONF_DIR}\""
+    else
+	echo "*   export TACHYON_CONF_DIR=\"${TACHYON_CONF_DIR}\""
+    fi
+    echo "*   cd $TACHYON_HOME"
+    echo "*"
+    echo "* Then you can do as you please.  For example:"
+    echo "*" 
+    echo "*   ${tachyoncmdprefix}/tachyon tfs ls /"
+    echo "*" 
+
+    if [ "${TACHYON_MODE}" == "setuponly" ]
+    then
+ 	echo "* To setup, you probably want to run:" 
+	echo "*"
+	echo "*   ${MAGPIE_REMOTE_CMD:-ssh}${MAGPIE_REMOTE_CMD_OPTS:+" "}${MAGPIE_REMOTE_CMD_OPTS} ${TACHYON_MASTER_NODE}"
+	if echo $MAGPIE_SHELL | grep -q csh
+	then
+	    echo "*   setenv TACHYON_CONF_DIR \"${TACHYON_CONF_DIR}\""
+	else
+	    echo "*   export TACHYON_CONF_DIR=\"${TACHYON_CONF_DIR}\""
+	fi
+	echo "*   cd $TACHYON_HOME"
+	echo "*   ${tachyoncmdprefix}/tachyon format"
+	echo "*   ${tachyoncmdprefix}/tachyon-start.sh -N all NoMount"
+	echo "*" 
+    fi
+
+    echo "* To end/cleanup your session, kill the daemons via:"
+    echo "*" 
+    echo "*   ${MAGPIE_REMOTE_CMD:-ssh}${MAGPIE_REMOTE_CMD_OPTS:+" "}${MAGPIE_REMOTE_CMD_OPTS} ${TACHYON_MASTER_NODE}"
+    if echo $MAGPIE_SHELL | grep -q csh
+    then
+	echo "*   setenv TACHYON_CONF_DIR \"${TACHYON_CONF_DIR}\""
+    else
+	echo "*   export TACHYON_CONF_DIR=\"${TACHYON_CONF_DIR}\""
+    fi
+    echo "*   cd $TACHYON_HOME"
+    echo "*   ${tachyoncmdprefix}/tachyon-stop.sh all"
+    echo "*" 
+    echo "* Some additional environment variables you may sometimes wish to set"
+    echo "*" 
+    if echo $MAGPIE_SHELL | grep -q csh
+    then
+	echo "*   setenv JAVA_HOME \"${JAVA_HOME}\""
+	echo "*   setenv TACHYON_HOME \"${TACHYON_HOME}\""
+    else
+	echo "*   export JAVA_HOME=\"${JAVA_HOME}\""
+	echo "*   export TACHYON_HOME=\"${TACHYON_HOME}\""
+    fi
+
+    if [ "${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}X" != "X" ]
+    then
+	echo "*"
+	echo "* If running interactively, sourcing"
+	echo "*"
+	echo "* ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}"
+	echo "*"
+	echo "* will set most common environment variables for your job."
+    fi
+    echo "*" 
+    echo "*******************************************************"
+
+    if [ "${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}X" != "X" ]
+    then
+	if echo $MAGPIE_SHELL | grep -q csh
+	then
+	    echo "setenv TACHYON_HOME \"${TACHYON_HOME}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    echo "setenv TACHYON_CONF_DIR \"${TACHYON_CONF_DIR}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    echo "setenv TACHYON_LOG_DIR \"${TACHYON_LOG_DIR}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    echo "setenv TACHYON_MASTER_NODE \"${TACHYON_MASTER_NODE}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    echo "setenv TACHYON_MASTER_PORT \"${TACHYON_MASTER_PORT}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    echo "setenv TACHYON_FIRST_WORKER_NODE \"${TACHYON_FIRST_WORKER_NODE}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    echo "setenv TACHYON_SLAVE_COUNT \"${TACHYON_SLAVE_COUNT}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    if [ "${TACHYON_VERSION}X" != "X" ]
+	    then
+		echo "setenv TACHYON_VERSION \"${TACHYON_VERSION}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    fi
+	else
+	    echo "export TACHYON_HOME=\"${TACHYON_HOME}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    echo "export TACHYON_CONF_DIR=\"${TACHYON_CONF_DIR}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    echo "export TACHYON_LOG_DIR=\"${TACHYON_LOG_DIR}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    echo "export TACHYON_MASTER_NODE=\"${TACHYON_MASTER_NODE}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    echo "export TACHYON_MASTER_PORT=\"${TACHYON_MASTER_PORT}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    echo "export TACHYON_FIRST_WORKER_NODE=\"${TACHYON_FIRST_WORKER_NODE}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    echo "export TACHYON_SLAVE_COUNT=\"${TACHYON_SLAVE_COUNT}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    if [ "${TACHYON_VERSION}X" != "X" ]
+	    then
+		echo "export TACHYON_VERSION=\"${TACHYON_VERSION}\"" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+	    fi
+	fi
+	echo "" >> ${MAGPIE_ENVIRONMENT_VARIABLE_SCRIPT}
+    fi
+
+    # Nothing to check for Tachyon, setup always passes
+    tachyon_should_be_torndown=1
+    tachyon_setup_successful=1
+else
+    tachyon_should_be_torndown=0
+    tachyon_setup_successful=1
+fi
+
+# Make sure all setup passed
+if [ "${zookeeper_setup_successful}" == "1" ] \
+    && [ "${hadoop_setup_successful}" == "1" ] \
+    && [ "${hbase_setup_successful}" == "1" ] \
+    && [ "${phoenix_setup_successful}" == "1" ] \
+    && [ "${spark_setup_successful}" == "1" ] \
+    && [ "${storm_setup_successful}" == "1" ] \
+    && [ "${tachyon_setup_successful}" == "1" ]
+then
+    if [ "${MAGPIE_JOB_TYPE}" == "script" ]
+    then
+	echo "*******************************************************"
+	echo "* Executing script $MAGPIE_SCRIPT_PATH"
+	echo "*******************************************************"
+	${MAGPIE_SCRIPT_PATH} &
+	scriptpid=$!
+	Magpie_wait_script ${scriptpid}
+    elif [ "${MAGPIE_JOB_TYPE}" == "interactive" ]
+    then
+	echo "*******************************************************"
+	echo "* Entering Magpie ${MAGPIE_JOB_TYPE} mode"
+        echo "*"
+        echo "* Run '${MAGPIE_REMOTE_CMD:-ssh}${MAGPIE_REMOTE_CMD_OPTS:+" "}${MAGPIE_REMOTE_CMD_OPTS} $(hostname) kill -s 10 $$' to exit ${MAGPIE_JOB_TYPE} mode early."
+	echo "*******************************************************"
+	# Will set jobtimeseconds
+	Magpie_job_time_seconds
+        # Some systems have SIGUSR1 as USR1 so lets just use the value
+        trap "echo \"Exiting from ${MAGPIE_JOB_TYPE} mode due to user interrupt.\"" 10
+	sleep ${jobtimeseconds} &
+        wait
+    elif [ "${MAGPIE_JOB_TYPE}" == "pig" ]
+    then
+	if [ "${PIG_MODE}" == "testpig" ]
+	then
+	    echo "*******************************************************"
+	    echo "* Running Testpig"
+	    echo "*******************************************************"
+	    ${MAGPIE_SCRIPTS_HOME}/magpie-run-pig-testpig &
+	    scriptpid=$!
+	    Magpie_wait_script ${scriptpid}
+	elif [ "${PIG_MODE}" == "script" ]
+	then
+	    echo "*******************************************************"
+	    echo "* Executing Pig script $PIG_SCRIPT_PATH"
+	    echo "*******************************************************"
+	    ${PIG_HOME}/${pigcmdprefix}/pig ${PIG_SCRIPT_OPTS} ${PIG_SCRIPT_PATH} &
+	    scriptpid=$!
+	    Magpie_wait_script ${scriptpid}
+	elif [ "${PIG_MODE}" == "interactive" ]
+	then
+	    echo "*******************************************************"
+	    echo "* Entering Pig ${PIG_MODE} mode"
+            echo "*"
+            echo "* Run '${MAGPIE_REMOTE_CMD:-ssh}${MAGPIE_REMOTE_CMD_OPTS:+" "}${MAGPIE_REMOTE_CMD_OPTS} $(hostname) kill -s 10 $$' to exit ${PIG_MODE} mode early."
+	    echo "*******************************************************"
+	    # Will set jobtimeseconds
+	    Magpie_job_time_seconds
+            # Some systems have SIGUSR1 as USR1 so lets just use the value
+            trap "echo \"Exiting from ${PIG_MODE} mode due to user interrupt.\"" 10
+	    sleep ${jobtimeseconds} &
+            wait
+	fi
+    elif [ "${MAGPIE_JOB_TYPE}" == "hadoop" ]
+    then
+	cd ${HADOOP_HOME}
+	
+	if [ "${HADOOP_MODE}" == "terasort" ]
+	then
+	    echo "*******************************************************"
+	    echo "* Running Terasort"
+	    echo "*******************************************************"
+	    
+	    ${MAGPIE_SCRIPTS_HOME}/magpie-run-hadoop-terasort &
+	    scriptpid=$!
+	    Magpie_wait_script ${scriptpid}
+	elif [ "${HADOOP_MODE}" == "script" ]
+	then
+	    echo "*******************************************************"
+	    echo "* Executing script $HADOOP_SCRIPT_PATH"
+	    echo "*******************************************************"
+	    ${HADOOP_SCRIPT_PATH} &
+	    scriptpid=$!
+	    Magpie_wait_script ${scriptpid}
+	elif [ "${HADOOP_MODE}" == "interactive" ] \
+	    || [ "${HADOOP_MODE}" == "setuponly" ]
+	then
+	    echo "*******************************************************"
+	    echo "* Entering Hadoop ${HADOOP_MODE} mode"
+            echo "*"
+            echo "* Run '${MAGPIE_REMOTE_CMD:-ssh}${MAGPIE_REMOTE_CMD_OPTS:+" "}${MAGPIE_REMOTE_CMD_OPTS} $(hostname) kill -s 10 $$' to exit ${HADOOP_MODE} mode early."
+	    echo "*******************************************************"
+	    # Will set jobtimeseconds
+	    Magpie_job_time_seconds
+            # Some systems have SIGUSR1 as USR1 so lets just use the value
+            trap "echo \"Exiting from ${HADOOP_MODE} mode due to user interrupt.\"" 10
+	    sleep ${jobtimeseconds} &
+            wait
+	elif [ "${HADOOP_MODE}" == "upgradehdfs" ]
+	then
+	    echo "*******************************************************"
+	    echo "* Entering Hadoop ${HADOOP_MODE} mode"
+	    echo "*******************************************************"
+	    ${MAGPIE_SCRIPTS_HOME}/magpie-run-hadoop-upgradehdfs &
+	    scriptpid=$!
+	    Magpie_wait_script ${scriptpid}
+
+	    if [ "${hdfsstoredversionpath}X" != "X" ]
+	    then
+		rm -f ${hdfsstoredversionpath}
+		echo "${HADOOP_VERSION}" > ${hdfsstoredversionpath}
+	    fi
+	fi
+    elif [ "${MAGPIE_JOB_TYPE}" == "hbase" ]
+    then
+	cd ${HBASE_HOME}
+	
+	if [ "${HBASE_MODE}" == "performanceeval" ]
+	then
+	    echo "*******************************************************"
+	    echo "* Running Performance Evaluation"
+	    echo "*******************************************************"
+	    
+	    ${MAGPIE_SCRIPTS_HOME}/magpie-run-hbase-performanceeval &
+	    scriptpid=$!
+	    Magpie_wait_script ${scriptpid}
+	elif [ "${HBASE_MODE}" == "script" ]
+	then
+	    echo "*******************************************************"
+	    echo "* Executing script $HBASE_SCRIPT_PATH"
+	    echo "*******************************************************"
+	    ${HBASE_SCRIPT_PATH} &
+	    scriptpid=$!
+	    Magpie_wait_script ${scriptpid}
+	elif [ "${HBASE_MODE}" == "interactive" ] \
+	    || [ "${HBASE_MODE}" == "setuponly" ]
+	then
+	    echo "*******************************************************"
+	    echo "* Entering Hbase ${HBASE_MODE} mode"
+            echo "*"
+            echo "* Run '${MAGPIE_REMOTE_CMD:-ssh}${MAGPIE_REMOTE_CMD_OPTS:+" "}${MAGPIE_REMOTE_CMD_OPTS} $(hostname) kill -s 10 $$' to exit ${HBASE_MODE} mode early."
+	    echo "*******************************************************"
+	    # Will set jobtimeseconds
+	    Magpie_job_time_seconds
+            # Some systems have SIGUSR1 as USR1 so lets just use the value
+            trap "echo \"Exiting from ${HBASE_MODE} mode due to user interrupt.\"" 10
+	    sleep ${jobtimeseconds} &
+            wait
+	fi
+    elif [ "${MAGPIE_JOB_TYPE}" == "phoenix" ]
+    then
+	cd ${PHOENIX_HOME}
+	
+	if [ "${PHOENIX_MODE}" == "performanceeval" ]
+	then
+	    echo "*******************************************************"
+	    echo "* Running Performance Evaluation"
+	    echo "*******************************************************"
+	    
+	    ${MAGPIE_SCRIPTS_HOME}/magpie-run-phoenix-performanceeval &
+	    scriptpid=$!
+	    Magpie_wait_script ${scriptpid}
+	elif [ "${PHOENIX_MODE}" == "script" ]
+	then
+	    echo "*******************************************************"
+	    echo "* Executing script $PHOENIX_SCRIPT_PATH"
+	    echo "*******************************************************"
+	    ${PHOENIX_HOME}/${phoenixcmdprefix}/sqlline.py ${PHOENIX_SCRIPT_OPTS} ${PHOENIX_SCRIPT_PATH} &
+	    scriptpid=$!
+	    Magpie_wait_script ${scriptpid}
+	elif [ "${PHOENIX_MODE}" == "interactive" ] 
+	then
+	    echo "*******************************************************"
+	    echo "* Entering Phoenix ${PHOENIX_MODE} mode"
+            echo "*"
+            echo "* Run '${MAGPIE_REMOTE_CMD:-ssh}${MAGPIE_REMOTE_CMD_OPTS:+" "}${MAGPIE_REMOTE_CMD_OPTS} $(hostname) kill -s 10 $$' to exit ${PHOENIX_MODE} mode early."
+	    echo "*******************************************************"
+	    # Will set jobtimeseconds
+	    Magpie_job_time_seconds
+            # Some systems have SIGUSR1 as USR1 so lets just use the value
+            trap "echo \"Exiting and tearing down daeomons from ${PHOENIX_MODE} mode due to user interrupt.\"" 10
+	    sleep ${jobtimeseconds} &
+            wait
+	fi
+    elif [ "${MAGPIE_JOB_TYPE}" == "spark" ]
+    then
+	cd ${SPARK_HOME}
+	    
+	if [ "${SPARK_MODE}" == "sparkpi" ]
+	then
+	    echo "*******************************************************"
+	    echo "* Running SparkPi"
+	    echo "*******************************************************"
+	    ${MAGPIE_SCRIPTS_HOME}/magpie-run-spark-sparkpi &
+	    scriptpid=$!
+	    Magpie_wait_script ${scriptpid}
+	elif [ "${SPARK_MODE}" == "sparkwordcount" ]
+	then
+	    echo "*******************************************************"
+	    echo "* Running SparkWordCount"
+	    echo "*******************************************************"
+	    ${MAGPIE_SCRIPTS_HOME}/magpie-run-spark-sparkwordcount &
+	    scriptpid=$!
+	    Magpie_wait_script ${scriptpid}
+	elif [ "${SPARK_MODE}" == "script" ]
+	then
+	    echo "*******************************************************"
+	    echo "* Executing script $SPARK_SCRIPT_PATH"
+	    echo "*******************************************************"
+	    ${SPARK_SCRIPT_PATH} &
+	    scriptpid=$!
+	    Magpie_wait_script ${scriptpid}
+	elif [ "${SPARK_MODE}" == "interactive" ] \
+	    || [ "${SPARK_MODE}" == "setuponly" ]
+	then
+	    echo "*******************************************************"
+	    echo "* Entering Spark ${SPARK_MODE} mode"
+            echo "*"
+            echo "* Run '${MAGPIE_REMOTE_CMD:-ssh}${MAGPIE_REMOTE_CMD_OPTS:+" "}${MAGPIE_REMOTE_CMD_OPTS} $(hostname) kill -s 10 $$' to exit ${SPARK_MODE} mode early."
+	    echo "*******************************************************"
+	    # Will set jobtimeseconds
+	    Magpie_job_time_seconds
+            # Some systems have SIGUSR1 as USR1 so lets just use the value
+            trap "echo \"Exiting from ${SPARK_MODE} mode due to user interrupt.\"" 10
+	    sleep ${jobtimeseconds} &
+            wait
+	fi
+    elif [ "${MAGPIE_JOB_TYPE}" == "storm" ]
+    then
+	cd ${STORM_HOME}
+	    
+	if [ "${STORM_MODE}" == "stormwordcount" ]
+	then
+	    echo "*******************************************************"
+	    echo "* Running Storm WordCount"
+	    echo "*******************************************************"
+	    
+	    ${MAGPIE_SCRIPTS_HOME}/magpie-run-storm-stormwordcount &
+	    scriptpid=$!
+	    Magpie_wait_script ${scriptpid}
+	elif [ "${STORM_MODE}" == "script" ]
+	then
+	    echo "*******************************************************"
+	    echo "* Executing script $STORM_SCRIPT_PATH"
+	    echo "*******************************************************"
+	    ${STORM_SCRIPT_PATH} &
+	    scriptpid=$!
+	    Magpie_wait_script ${scriptpid}
+	elif [ "${STORM_MODE}" == "interactive" ] \
+	    || [ "${STORM_MODE}" == "setuponly" ]
+	then
+	    echo "*******************************************************"
+	    echo "* Entering Storm ${STORM_MODE} mode"
+            echo "*"
+            echo "* Run '${MAGPIE_REMOTE_CMD:-ssh}${MAGPIE_REMOTE_CMD_OPTS:+" "}${MAGPIE_REMOTE_CMD_OPTS} $(hostname) kill -s 10 $$' to exit ${STORM_MODE} mode early."
+	    echo "*******************************************************"
+	    # Will set jobtimeseconds
+	    Magpie_job_time_seconds
+            # Some systems have SIGUSR1 as USR1 so lets just use the value
+            trap "echo \"Exiting from ${STORM_MODE} mode due to user interrupt.\"" 10
+	    sleep ${jobtimeseconds} &
+            wait
+	fi
+    elif [ "${MAGPIE_JOB_TYPE}" == "tachyon" ]
+    then
+	if [ "${TACHYON_MODE}" == "testtachyon" ]
+	then
+	    echo "*******************************************************"
+	    echo "* Running Testtachyon"
+	    echo "*******************************************************"
+	    ${MAGPIE_SCRIPTS_HOME}/magpie-run-tachyon-testtachyon &
+	    scriptpid=$!
+	    Magpie_wait_script ${scriptpid}
+	elif [ "${TACHYON_MODE}" == "launch" ] \
+	    || [ "${TACHYON_MODE}" == "setuponly" ]
+	then
+	    echo "*******************************************************"
+	    echo "* Entering Tachyon ${TACHYON_MODE} mode"
+            echo "*"
+            echo "* Run '${MAGPIE_REMOTE_CMD:-ssh}${MAGPIE_REMOTE_CMD_OPTS:+" "}${MAGPIE_REMOTE_CMD_OPTS} $(hostname) kill -s 10 $$' to exit ${TACHYON_MODE} mode early."
+	    echo "*******************************************************"
+	    # Will set jobtimeseconds
+	    Magpie_job_time_seconds
+            # Some systems have SIGUSR1 as USR1 so lets just use the value
+            trap "echo \"Exiting from ${TACHYON_MODE} mode due to user interrupt.\"" 10
+	    sleep ${jobtimeseconds} &
+            wait
+	fi
+    elif [ "${MAGPIE_JOB_TYPE}" == "zookeeper" ]
+    then
+	if [ "${ZOOKEEPER_MODE}" == "zookeeperruok" ]
+	then
+	    echo "*******************************************************"
+	    echo "* Running Zookeeper ruok"
+	    echo "*******************************************************"
+	    ${MAGPIE_SCRIPTS_HOME}/magpie-run-zookeeper-zookeeperruok &
+	    scriptpid=$!
+	    Magpie_wait_script ${scriptpid}
+	elif [ "${ZOOKEEPER_MODE}" == "launch" ] \
+	    || [ "${ZOOKEEPER_MODE}" == "setuponly" ]
+	then
+	    echo "*******************************************************"
+	    echo "* Entering Zookeeper ${ZOOKEEPER_MODE} mode"
+	    echo "*"
+            echo "* Run '${MAGPIE_REMOTE_CMD:-ssh}${MAGPIE_REMOTE_CMD_OPTS:+" "}${MAGPIE_REMOTE_CMD_OPTS} $(hostname) kill -s 10 $$' to exit ${ZOOKEEPER_MODE} mode early."
+	    echo "*******************************************************"
+	    # Will set jobtimeseconds
+	    Magpie_job_time_seconds
+            # Some systems have SIGUSR1 as USR1 so lets just use the value
+            trap "echo \"Exiting from ${ZOOKEEPER_MODE} mode due to user interrupt.\"" 10
+	    sleep ${jobtimeseconds} &
+            wait
+	fi
+    elif [ "${MAGPIE_JOB_TYPE}" == "testall" ]
+    then
+	echo "*******************************************************"
+	echo "* Running Magpie TestAll"
+	echo "*******************************************************"
+	${MAGPIE_SCRIPTS_HOME}/magpie-run-magpie-testall &
+	scriptpid=$!
+	Magpie_wait_script ${scriptpid}
+    fi
+fi
+
+if [ "${STORM_SETUP}" == "yes" ] && [ "${storm_should_be_torndown}" == "1" ]
+then
+    if [ ${STORM_MODE} != "setuponly" ]
+    then
+	# Make variables unspecified for shutdown
+	Magpie_make_all_local_dirs_unspecified
+
+	echo "Stopping storm"
+	${MAGPIE_SCRIPTS_HOME}/bin/magpie-storm.sh stop
+
+	# Make variables specific now within Magpie
+	Magpie_make_all_local_dirs_node_specific
+    fi
+fi
+
+if [ "${SPARK_SETUP}" == "yes" ] && [ "${spark_should_be_torndown}" == "1" ]
+then
+    if [ ${SPARK_MODE} != "setuponly" ]
+    then
+	cd ${SPARK_HOME}
+	
+	# Make variables unspecified for shutdown
+	Magpie_make_all_local_dirs_unspecified
+
+	echo "Stopping spark"
+	${sparksetupscriptprefix}/stop-all.sh
+
+        # Make variables specific now within Magpie
+	Magpie_make_all_local_dirs_node_specific
+    fi
+fi
+
+if [ "${PHOENIX_SETUP}" == "yes" ] && [ "${HBASE_SETUP}" == "yes" ] && [ "${phoenix_should_be_torndown}" == "1" ]
+then
+    if [ ${PHOENIX_MODE} == "server" ]
+    then
+	cd ${PHOENIX_HOME}
+	
+	# Make variables unspecified for shutdown
+	Magpie_make_all_local_dirs_unspecified
+
+	echo "Stopping Phoenix"
+        ${MAGPIE_SCRIPTS_HOME}/bin/magpie-phoenix.sh stop
+
+        # Make variables specific now within Magpie
+	Magpie_make_all_local_dirs_node_specific
+    fi
+fi
+
+if [ "${HBASE_SETUP}" == "yes" ] && [ "${hbase_should_be_torndown}" == "1" ]
+then
+    if [ ${HBASE_MODE} != "setuponly" ]
+    then
+	cd ${HBASE_HOME}
+	
+	echo "Stopping hbase"
+	
+	if [ "${hbase_setup_successful}" == "1" ]
+	then
+	    if [ "${HBASE_MAJOR_COMPACTION_ON_SHUTDOWN}X" == "X" ] || [ "${HBASE_MAJOR_COMPACTION_ON_SHUTDOWN}" == "yes" ]
+	    then
+		echo "Doing major compaction before shutting down ..."
+	    
+		command="echo list"
+		echo "Running $command in hbase shell" >&2
+		listoutput=`$command | ${hbasecmdprefix}/hbase shell | sed -n '/TABLE/,/seconds/p' | tail -n+2 | head -n -1`
+		
+		for table in ${listoutput}
+		do
+		    command="echo major_compact '${table}'"
+		    echo "Running $command in hbase shell" >&2
+		    $command | ${hbasecmdprefix}/hbase shell
+		done
+	    fi
+	fi
+	
+	# Make variables unspecified for shutdown
+	Magpie_make_all_local_dirs_unspecified
+
+        if [ "${HBASE_START_THRIFT_SERVER}" == "yes" ]
+        then
+            ${hbasesetupscriptprefix}/hbase-daemon.sh stop thrift
+        fi
+
+	${hbasesetupscriptprefix}/stop-hbase.sh
+
+        # Make variables specific now within Magpie
+	Magpie_make_all_local_dirs_node_specific
+    fi
+fi
+
+# Tachyon before Hadoop shutdown, may need to flush
+if [ "${TACHYON_SETUP}" == "yes" ] && [ "${tachyon_should_be_torndown}" == "1" ]
+then
+    if [ ${TACHYON_MODE} != "setuponly" ]
+    then
+	cd ${TACHYON_HOME}
+
+	if [ "${TACHYON_JOURNAL_FOLDER}X" == "X" ]
+	then
+	    echo "Clearing tachyon data"
+	    
+	    command="${tachyoncmdprefix}/tachyon tfs rmr /"
+	    echo "Running $command" >&2
+	    $command
+	fi
+
+	echo "Stopping tachyon"
+	${tachyoncmdprefix}/tachyon-stop.sh all
+    fi
+fi
+
+if [ "${HADOOP_SETUP}" == "yes" ] && [ "${hadoop_should_be_torndown}" == "1" ]
+then
+    if [ ${HADOOP_MODE} != "setuponly" ]
+    then
+		cd ${HADOOP_HOME}
+		
+		echo "Stopping hadoop"
+		
+	  	# Make variables unspecified for shutdown
+		Magpie_make_all_local_dirs_unspecified
+
+		if [ "${HADOOP_SETUP_TYPE}" == "MR1" ]
+		then
+		    ${hadoopsetupscriptprefix}/stop-mapred.sh
+		    ${hadoopsetupscriptprefix}/stop-jobhistoryserver.sh
+		fi
+		
+		if [ "${HADOOP_SETUP_TYPE}" == "MR2" ]
+		then
+		    ${hadoopsetupscriptprefix}/stop-yarn.sh
+		    ${hadoopsetupscriptprefix}/mr-jobhistory-daemon.sh stop historyserver
+		fi
+
+		# Make variables specific now within Magpie
+		Magpie_make_all_local_dirs_node_specific
+
+		if [ "$HADOOP_FILESYSTEM_MODE" == "hdfs" ] \
+		    || [ "$HADOOP_FILESYSTEM_MODE" == "hdfsoverlustre" ] \
+		    || [ "$HADOOP_FILESYSTEM_MODE" == "hdfsovernetworkfs" ]
+		then
+
+		    if [ "${hadoop_setup_successful}" == "1" ]
+		    then
+			echo "Saving namespace before shutting down hdfs ..."
+
+			if [ "${HDFS_FEDERATION_NAMENODE_COUNT}" -gt 1 ]
+			then
+			    for i in `seq 1 ${HDFS_FEDERATION_NAMENODE_COUNT}`
+			    do
+		            # First namenode is based on master
+				if [ "${i}" == "1" ]
+				then
+				    federationnamenodehost="${HADOOP_MASTER_NODE}"
+				else
+				    numline=`expr ${i} - 1`
+				    federationnamenodehost=`sed -n "${numline}p" ${HADOOP_CONF_DIR}/namenode_hdfs_federation`
+				fi
+				
+				command="${hadoopcmdprefix}/${dfsadminscript} dfsadmin -fs hdfs://${federationnamenodehost}:${HADOOP_HDFS_NAMENODE_ADDRESS} -safemode enter"
+				echo "Running $command" >&2
+				$command
+				
+				command="${hadoopcmdprefix}/${dfsadminscript} dfsadmin -fs hdfs://${federationnamenodehost}:${HADOOP_HDFS_NAMENODE_ADDRESS} -saveNamespace"
+				echo "Running $command" >&2
+				$command
+				
+				command="${hadoopcmdprefix}/${dfsadminscript} dfsadmin -fs hdfs://${federationnamenodehost}:${HADOOP_HDFS_NAMENODE_ADDRESS} -safemode leave"
+				echo "Running $command" >&2
+				$command
+			    done
+			else
+			    command="${hadoopcmdprefix}/${dfsadminscript} dfsadmin -safemode enter"
+			    echo "Running $command" >&2
+			    $command
+			    
+			    command="${hadoopcmdprefix}/${dfsadminscript} dfsadmin -saveNamespace"
+			    echo "Running $command" >&2
+			    $command
+			    
+			    command="${hadoopcmdprefix}/${dfsadminscript} dfsadmin -safemode leave"
+			    echo "Running $command" >&2
+			    $command
+			fi
+		    fi
+
+	  	    # Make variables unspecified for shutdown
+		    Magpie_make_all_local_dirs_unspecified
+
+		    ${hadoopsetupscriptprefix}/stop-dfs.sh 
+
+		    # Make variables specific now within Magpie
+		    Magpie_make_all_local_dirs_node_specific
+		fi
+    fi
+fi
+
+# Zookeeper teardown comes last, as other things like Hbase & Storm require it
+
+if [ "${ZOOKEEPER_SETUP}" == "yes" ] && [ "${zookeeper_should_be_torndown}" == "1" ]
+then
+    if [ "${ZOOKEEPER_MODE}" != "setuponly" ]
+    then
+	# Make variables unspecified for shutdown
+	Magpie_make_all_local_dirs_unspecified
+
+	echo "Stopping Zookeeper"
+	${MAGPIE_SCRIPTS_HOME}/bin/magpie-zookeeper.sh stop
+
+	# Make variables specific now within Magpie
+	Magpie_make_all_local_dirs_node_specific
+    fi
+fi
+
+exit 0
+

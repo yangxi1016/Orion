@@ -1,0 +1,513 @@
+#!/bin/bash
+#############################################################################
+#  Copyright (C) 2013-2015 Lawrence Livermore National Security, LLC.
+#  Produced at Lawrence Livermore National Laboratory (cf, DISCLAIMER).
+#  Written by Albert Chu <chu11@llnl.gov>
+#  LLNL-CODE-644248
+#  
+#  This file is part of Magpie, scripts for running Hadoop on
+#  traditional HPC systems.  For details, see <URL>.
+#  
+#  Magpie is free software; you can redistribute it and/or modify it
+#  under the terms of the GNU General Public License as published by
+#  the Free Software Foundation; either version 2 of the License, or
+#  (at your option) any later version.
+#  
+#  Magpie is distributed in the hope that it will be useful, but
+#  WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+#  General Public License for more details.
+#  
+#  You should have received a copy of the GNU General Public License
+#  along with Magpie.  If not, see <http://www.gnu.org/licenses/>.
+#############################################################################
+
+# Export common functions
+#
+# This is used by scripts, don't edit this
+#
+# Unlike 'magpie-helper-functions', these functions are common but
+# live inside the Magpie system.  They largely require environment
+# variables, functions, etc. to have been setup.
+
+source ${MAGPIE_SCRIPTS_HOME}/magpie-submission-convert
+source ${MAGPIE_SCRIPTS_HOME}/magpie-helper-functions
+source ${MAGPIE_SCRIPTS_HOME}/magpie-common-exports
+source ${MAGPIE_SCRIPTS_HOME}/magpie-variable-conversion
+
+Magpie_am_I_master () {
+    local myhostname=`hostname`
+
+    Magpie_make_all_local_dirs_node_specific
+
+    if [ "${HADOOP_SETUP}" == "yes" ] && [ -f "${HADOOP_CONF_DIR}/masters" ]
+    then
+	if grep -q -E "^${myhostname}$" ${HADOOP_CONF_DIR}/masters
+	then 
+	    return 0
+	fi
+    elif [ "${HBASE_SETUP}" == "yes" ] && [ -f "${HBASE_CONF_DIR}/masters" ]
+    then
+	if grep -q -E "^${myhostname}$" ${HBASE_CONF_DIR}/masters
+	then 
+	    return 0
+	fi
+    elif [ "${SPARK_SETUP}" == "yes" ] && [ -f "${SPARK_CONF_DIR}/masters" ]
+    then
+	if grep -q -E "^${myhostname}$" ${SPARK_CONF_DIR}/masters
+	then 
+	    return 0
+	fi
+    elif [ "${STORM_SETUP}" == "yes" ] && [ -f "${STORM_CONF_DIR}/masters" ]
+    then
+	if grep -q -E "^${myhostname}$" ${STORM_CONF_DIR}/masters
+	then 
+	    return 0
+	fi
+    elif [ "${ZOOKEEPER_SETUP}" == "yes" ] && [ -f "${ZOOKEEPER_CONF_DIR}/zookeeper_master" ]
+    then
+	if grep -q -E "^${myhostname}$" ${ZOOKEEPER_CONF_DIR}/zookeeper_master
+	then 
+	    return 0
+	fi
+    fi
+    return 1
+}
+
+Magpie_am_I_a_hadoop_node () {
+    local myhostname=`hostname`
+
+    Magpie_make_hadoop_local_dirs_node_specific
+
+    if grep -q -E "^${myhostname}$" ${HADOOP_CONF_DIR}/slaves \
+	|| grep -q -E "^${myhostname}$" ${HADOOP_CONF_DIR}/masters \
+	|| grep -s -q -E "^${myhostname}$" ${HADOOP_CONF_DIR}/namenode_hdfs_federation
+    then 
+	if grep -q -E "^${myhostname}$" ${HADOOP_CONF_DIR}/masters
+	then
+	    hadoopnoderank=0
+	elif grep -s -q -E "^${myhostname}$" ${HADOOP_CONF_DIR}/namenode_hdfs_federation
+	then
+	    subrank=`grep -n -E "^${myhostname}$" ${HADOOP_CONF_DIR}/namenode_hdfs_federation | awk --field-separator=':' '{print $1}'`
+	    hadoopnoderank="0${subrank}"
+	else
+	    hadoopnoderank=`grep -n -E "^${myhostname}$" ${HADOOP_CONF_DIR}/slaves | awk --field-separator=':' '{print $1}'`
+	fi
+	return 0
+    fi
+    return 1
+}
+
+Magpie_am_I_a_hadoop_namenode () {
+    local myhostname=`hostname`
+
+    Magpie_make_hadoop_local_dirs_node_specific
+
+    if grep -q -E "^${myhostname}$" ${HADOOP_CONF_DIR}/masters \
+	|| grep -s -q -E "^${myhostname}$" ${HADOOP_CONF_DIR}/namenode_hdfs_federation
+    then 
+	if grep -q -E "^${myhostname}$" ${HADOOP_CONF_DIR}/masters
+	then
+	    hadoopnoderank=0
+	else
+	    subrank=`grep -n -E "^${myhostname}$" ${HADOOP_CONF_DIR}/namenode_hdfs_federation | awk --field-separator=':' '{print $1}'`
+	    hadoopnoderank="0${subrank}"
+	fi
+	return 0
+    fi
+    return 1
+}
+
+Magpie_am_I_a_hbase_node () {
+    local myhostname=`hostname`
+
+    Magpie_make_hbase_local_dirs_node_specific
+
+    if grep -q -E "^${myhostname}$" ${HBASE_CONF_DIR}/regionservers \
+	|| grep -q -E "^${myhostname}$" ${HBASE_CONF_DIR}/masters
+    then 
+	if grep -q -E "^${myhostname}$" ${HBASE_CONF_DIR}/masters
+	then
+	    hbasenoderank=0
+	else
+	    hbasenoderank=`grep -n -E "^${myhostname}$" ${HBASE_CONF_DIR}/regionservers | awk --field-separator=':' '{print $1}'`
+	fi
+	return 0
+    fi
+    return 1
+}
+
+Magpie_am_I_a_phoenix_node () {
+    return $(Magpie_am_I_a_hbase_node)
+}
+
+Magpie_am_I_a_spark_node () {
+    local myhostname=`hostname`
+
+    Magpie_make_spark_local_dirs_node_specific
+
+    if grep -q -E "^${myhostname}$" ${SPARK_CONF_DIR}/slaves \
+	|| grep -q -E "^${myhostname}$" ${SPARK_CONF_DIR}/masters
+    then 
+	if grep -q -E "^${myhostname}$" ${SPARK_CONF_DIR}/masters
+	then
+	    sparknoderank=0
+	else
+	    sparknoderank=`grep -n -E "^${myhostname}$" ${SPARK_CONF_DIR}/slaves | awk --field-separator=':' '{print $1}'`
+	fi
+	return 0
+    fi
+    return 1
+}
+
+Magpie_am_I_a_storm_node () {
+    local myhostname=`hostname`
+
+    Magpie_make_storm_local_dirs_node_specific
+
+    if grep -q -E "^${myhostname}$" ${STORM_CONF_DIR}/workers \
+	|| grep -q -E "^${myhostname}$" ${STORM_CONF_DIR}/masters
+    then 
+	if grep -q -E "^${myhostname}$" ${STORM_CONF_DIR}/masters
+	then
+	    stormnoderank=0
+	else
+	    stormnoderank=`grep -n -E "^${myhostname}$" ${STORM_CONF_DIR}/workers | awk --field-separator=':' '{print $1}'`
+	fi
+	return 0
+    fi
+    return 1
+}
+
+Magpie_am_I_a_tachyon_node () {
+    local myhostname=`hostname`
+
+    Magpie_make_tachyon_local_dirs_node_specific
+
+    if grep -q -E "^${myhostname}$" ${TACHYON_CONF_DIR}/workers \
+	|| grep -q -E "^${myhostname}$" ${TACHYON_CONF_DIR}/masters
+    then 
+	if grep -q -E "^${myhostname}$" ${TACHYON_CONF_DIR}/masters
+	then
+	    tachyonnoderank=0
+	else
+	    tachyonnoderank=`grep -n -E "^${myhostname}$" ${TACHYON_CONF_DIR}/workers | awk --field-separator=':' '{print $1}'`
+	fi
+	return 0
+    fi
+    return 1
+}
+
+Magpie_am_I_a_zookeeper_node () {
+    local myhostname=`hostname`
+
+    Magpie_make_zookeeper_local_dirs_node_specific
+
+    if grep -q -E "^${myhostname}$" ${ZOOKEEPER_CONF_DIR}/zookeeper_master \
+	|| grep -q -E "^${myhostname}$" ${ZOOKEEPER_CONF_DIR}/zookeeper_slaves
+    then 
+	# The Zookeeper master is not a Zookeeper node, it gets no rank
+	if grep -q -E "^${myhostname}$" ${ZOOKEEPER_CONF_DIR}/zookeeper_slaves
+	then
+	    zookeepernoderank=`grep -n -E "^${myhostname}$" ${ZOOKEEPER_CONF_DIR}/zookeeper_slaves | awk --field-separator=':' '{print $1}'`
+	fi
+	return 0
+    fi
+    return 1
+}
+
+Magpie_job_time_minutes () {
+    # slurmsbatch & msubslurm legacy
+    if [ "${MAGPIE_SUBMISSION_TYPE}" == "slurmsbatch" ] \
+	|| [ "${MAGPIE_SUBMISSION_TYPE}" == "sbatchsrun" ] \
+	|| [ "${MAGPIE_SUBMISSION_TYPE}" == "msubslurm" ] \
+	|| [ "${MAGPIE_SUBMISSION_TYPE}" == "msubslurmpdsh" ]
+    then
+	timeleftwalltime=`squeue -j ${SLURM_JOB_ID} -h -o %L`
+	if [ "${timeleftwalltime}" == "NOT_SET" ] || [ "${timeleftwalltime}" == "UNLIMITED" ]
+	then
+            walltimetominutes=`expr ${MAGPIE_TIMELIMIT_MINUTES} - ${MAGPIE_STARTUP_TIME}`
+	else
+            Magpie_walltime_to_minutes ${timeleftwalltime}
+	fi
+        jobtimeminutes=`expr ${walltimetominutes} - ${MAGPIE_SHUTDOWN_TIME}`
+    else
+	timeleftminutes=`expr ${MAGPIE_TIMELIMIT_MINUTES} - ${MAGPIE_STARTUP_TIME}`
+	jobtimeminutes=`expr ${timeleftminutes} - ${MAGPIE_SHUTDOWN_TIME}`
+    fi
+}
+
+Magpie_job_time_seconds () {
+    Magpie_job_time_minutes
+    jobtimeseconds=`expr ${jobtimeminutes}  \* 60`
+}
+
+Magpie_wait_script () {
+    scriptpid=$1
+
+    # Will set jobtimeminutes
+    Magpie_job_time_minutes
+
+    # We sleep in 30 second chunks, so times 2
+    scriptsleepiterations=`expr ${jobtimeminutes}  \* 2`
+    scriptexitted=0
+    for ((i = 1; i <= ${scriptsleepiterations}; i++)); do
+	if kill -0 ${scriptpid} 2&> /dev/null
+	then
+	    sleep 30
+	else
+	    scriptexitted=1
+	    break
+	fi
+    done
+
+    if [ "${scriptexitted}" == "0" ]
+    then
+	echo "Killing script, did not exit within time limit"
+	kill ${scriptpid}
+    fi
+    return 0
+}
+
+# XXX deal with viewfs & federation
+Magpie_calculate_hadoop_filesystem_paths () {
+    local noderank=$1
+    if [ "${HADOOP_FILESYSTEM_MODE}" == "hdfs" ]
+    then
+	hadooptmpdir=`echo ${HADOOP_HDFS_PATH} | awk -F, '{print $1}'`
+	if [ "${HDFS_FEDERATION_NAMENODE_COUNT}" -gt 1 ]
+	then
+	    fsdefault="viewfs:///"
+	else
+	    fsdefault="hdfs://${HADOOP_MASTER_NODE}:${HADOOP_HDFS_NAMENODE_ADDRESS}"
+	fi
+    elif [ "${HADOOP_FILESYSTEM_MODE}" == "hdfsoverlustre" ]
+    then
+        if [ "${HADOOP_PER_JOB_HDFS_PATH}" == "yes" ]
+        then
+            hadooptmpdir="${HADOOP_HDFSOVERLUSTRE_PATH}/${MAGPIE_JOB_ID}/node-${noderank}"
+        else
+            hadooptmpdir="${HADOOP_HDFSOVERLUSTRE_PATH}/node-${noderank}"
+        fi
+	if [ "${HDFS_FEDERATION_NAMENODE_COUNT}" -gt 1 ]
+	then
+	    fsdefault="viewfs:///"
+	else
+	    fsdefault="hdfs://${HADOOP_MASTER_NODE}:${HADOOP_HDFS_NAMENODE_ADDRESS}"
+	fi
+    elif [ "${HADOOP_FILESYSTEM_MODE}" == "hdfsovernetworkfs" ]
+    then
+        if [ "${HADOOP_PER_JOB_HDFS_PATH}" == "yes" ]
+        then
+            hadooptmpdir="${HADOOP_HDFSOVERNETWORKFS_PATH}/${MAGPIE_JOB_ID}/node-${noderank}"
+        else
+	    hadooptmpdir="${HADOOP_HDFSOVERNETWORKFS_PATH}/node-${noderank}"
+        fi
+        
+	if [ "${HDFS_FEDERATION_NAMENODE_COUNT}" -gt 1 ]
+	then
+	    fsdefault="viewfs:///"
+	else
+	    fsdefault="hdfs://${HADOOP_MASTER_NODE}:${HADOOP_HDFS_NAMENODE_ADDRESS}"
+	fi
+    elif [ "${HADOOP_FILESYSTEM_MODE}" == "rawnetworkfs" ]
+    then
+        if [ "${HADOOP_PER_JOB_HDFS_PATH}" == "yes" ]
+        then
+            hadooptmpdir="${HADOOP_RAWNETWORKFS_PATH}/${MAGPIE_JOB_ID}/node-${noderank}"
+        else
+	    hadooptmpdir="${HADOOP_RAWNETWORKFS_PATH}/node-${noderank}"
+        fi
+	fsdefault="file:///"
+    elif [ "${HADOOP_FILESYSTEM_MODE}" == "intellustre" ]
+    then
+        if [ "${HADOOP_PER_JOB_HDFS_PATH}" == "yes" ]
+        then
+            hadooptmpdir="${HADOOP_INTELLUSTRE_PATH}/${MAGPIE_JOB_ID}/tmp"
+        else
+  	    hadooptmpdir="${HADOOP_INTELLUSTRE_PATH}/tmp"
+        fi
+	fsdefault="lustre:///"
+    elif [ "${HADOOP_FILESYSTEM_MODE}" == "magpienetworkfs" ]
+    then
+        if [ "${HADOOP_PER_JOB_HDFS_PATH}" == "yes" ]
+        then
+            hadooptmpdir="${HADOOP_MAGPIENETWORKFS_PATH}/${MAGPIE_JOB_ID}/node-${noderank}"
+        else
+   	    hadooptmpdir="${HADOOP_MAGPIENETWORKFS_PATH}/node-${noderank}"
+        fi
+	fsdefault="magpienetworkfs:///"
+    else
+	echo "Illegal HADOOP_FILESYSTEM_MODE \"${HADOOP_FILESYSTEM_MODE}\" specified"
+	exit 1
+    fi
+}
+
+Magpie_calculate_stop_timeouts () {
+    magpieshutdowntimeseconds=`expr ${MAGPIE_SHUTDOWN_TIME} \* 60`
+
+    if [ "${MAGPIE_POST_JOB_RUN}X" != "X" ]
+    then
+	# Minimum 5 minutes or 1/3rd of time for MAGPIE_POST_JOB_RUN
+	magpiepostrunallocate=`expr ${magpieshutdowntimeseconds} \/ 3`
+	if [ "${magpiepostrunallocate}" -lt 300 ]
+	then
+	    magpiepostrunallocate=300
+	fi
+
+	magpieshutdowntimeseconds=`expr ${magpieshutdowntimeseconds} - ${magpiepostrunallocate}` 
+    fi
+
+    if [ "${HBASE_SETUP}" == "yes" ]
+    then
+	# Need to give Hbase more time b/c of compaction.  We'll say
+	# Hbase always gets 50% of the time, Half for slave timeout and half for
+	# compaction .  Input checks ensure
+	# magpieshutdowntimeseconds >= 1200 
+
+	hbase_time=`expr ${magpieshutdowntimeseconds} \/ 2`
+	hbase_slave_timeout=`expr ${hbase_time} \/ 2`
+	magpieshutdowntimeseconds=${hbase_time}
+    fi
+
+    stoptimeoutdivisor=1
+
+    if [ "${HADOOP_SETUP}" == "yes" ]
+    then
+	if [ ${HADOOP_SETUP_TYPE}  == "MR1" ] \
+	    || [ ${HADOOP_SETUP_TYPE}  == "MR2" ]
+	then
+            # Need to split timeout time between namenode, datanodes,
+            # secondary namenode, jobtracker/resource manager,
+            # tasktracker/nodemanagers, jobhistory server, & saveNameSpace
+            # time
+	    stoptimeoutdivisor=`expr ${stoptimeoutdivisor} + 7`
+	else
+            # Need to split timeout time between namenode, datanodes,
+            # secondary namenode, jobhistory server, & saveNameSpace time
+	    stoptimeoutdivisor=`expr ${stoptimeoutdivisor} + 5`
+	fi    
+    
+	# + 2 for scratch extra time in scripts and what not
+	stoptimeoutdivisor=`expr ${stoptimeoutdivisor} + 2`
+    fi
+
+    if [ "${SPARK_SETUP}" == "yes" ]
+    then
+	# +2 for extra misc shutdown time
+	stoptimeoutdivisor=`expr ${stoptimeoutdivisor} + 2`
+    fi
+
+    if [ "${STORM_SETUP}" == "yes" ]
+    then
+	# +2 for extra misc shutdown time
+	stoptimeoutdivisor=`expr ${stoptimeoutdivisor} + 2`
+    fi
+
+    if [ "${ZOOKEEPER_SETUP}" == "yes" ]
+    then
+	# +2 for extra misc shutdown time
+	stoptimeoutdivisor=`expr ${stoptimeoutdivisor} + 2`
+    fi
+
+    stoptimeout=`expr ${magpieshutdowntimeseconds} \/ ${stoptimeoutdivisor}`
+	
+    if [ "${stoptimeout}" -lt 5 ]
+    then
+	stoptimeout=5
+    fi
+
+    hadoopstoptimeout=${stoptimeout}
+}
+
+# Count how many big data systems we're using that can run jobs
+# Pig as a wrapper around Hadoop, so it doesn't count
+Magpie_calculate_canrunjobscount () {
+    canrunjobscount=0
+
+    if [ "${HADOOP_SETUP}" == "yes" ] && ( [ "${HADOOP_SETUP_TYPE}" == "MR1" ] || [ "${HADOOP_SETUP_TYPE}" == "MR2" ] )
+    then
+	canrunjobscount=$((canrunjobscount+1))
+    fi
+
+    if [ "${HBASE_SETUP}" == "yes" ]
+    then
+	canrunjobscount=$((canrunjobscount+1))
+    fi
+ 
+    if [ "${SPARK_SETUP}" == "yes" ]
+    then
+	canrunjobscount=$((canrunjobscount+1))
+    fi
+
+    if [ "${STORM_SETUP}" == "yes" ]
+    then
+	canrunjobscount=$((canrunjobscount+1))
+    fi
+
+    # Could be zero in weird test scenarios
+    if [ "${canrunjobscount}" == "0" ]
+    then
+	canrunjobscount=1
+    fi
+}
+
+Magpie_calculate_threadstouse () {
+    proccount=`cat /proc/cpuinfo | grep processor | wc -l`
+
+    # Sets canrunjobscount
+    Magpie_calculate_canrunjobscount
+ 
+    # If only one system to run jobs, estimate 1.5X cores
+    # If > 1, split cores evenly amongst job running stuff
+
+    if [ "${canrunjobscount}" == "1" ]
+    then
+    threadstouse=`expr ${proccount}`
+    else
+    threadstouse=`expr ${proccount} \/ ${canrunjobscount}`  
+    fi
+
+    #threadstouse=`expr ${threadstouse} / 2`
+
+    if [ "${threadstouse}" == "0" ]
+    then
+        threadstouse="1"
+    fi
+}
+
+# Magpie_calculate_threadstouse () {
+#     proccount=`cat /proc/cpuinfo | grep processor | wc -l`
+
+#     # Sets canrunjobscount
+#     Magpie_calculate_canrunjobscount
+ 
+#     # If only one system to run jobs, estimate 1.5X cores
+#     # If > 1, split cores evenly amongst job running stuff
+
+#     if [ "${canrunjobscount}" == "1" ]
+#     then
+# 	threadstouse=`expr ${proccount} + ${proccount} \/ 2`
+#     else
+# 	threadstouse=`expr ${proccount} \/ ${canrunjobscount}`
+
+# 	if [ "${threadstouse}" == "0" ]
+# 	then
+# 	    threadstouse="1"
+# 	fi
+#     fi
+# }
+
+Magpie_calculate_memorytouse () {
+    memtotal=`cat /proc/meminfo | grep MemTotal | awk '{print $2}'`
+    memtotalgig=$(echo "(${memtotal} / 1048576)" | bc -l | xargs printf "%1.0f")
+    
+    # Sets canrunjobscount
+    Magpie_calculate_canrunjobscount
+
+    # We start w/ 80% of system memory 
+    memorytouse=$(echo "${memtotalgig} * .8" | bc -l | xargs printf "%1.0f")
+    memorytouse=`expr $memorytouse \/ ${canrunjobscount}`
+
+    memorytouse=$(echo "${memorytouse} * 1024" | bc -l | xargs printf "%1.0f")
+}

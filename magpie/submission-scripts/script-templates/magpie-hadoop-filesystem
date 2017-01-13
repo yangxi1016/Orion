@@ -1,0 +1,132 @@
+############################################################################
+# Hadoop Filesystem Mode Configurations
+############################################################################
+
+# Set how the filesystem should be setup
+#
+# "hdfs" - Normal straight up HDFS if you have local disk in your
+#          cluster.  This option is primarily for benchmarking and
+#          probably shouldn't be used in the general case.
+#
+#          Be careful running this in a cluster environment.  The next
+#          time you execute your job, if a different set of nodes are
+#          allocated to you, the HDFS data you wrote from a previous
+#          job may not be there.  Specifying specific nodes to use in
+#          your job submission (e.g. --nodelist in sbatch) may be a
+#          way to alleviate this.
+#
+#          User must set HADOOP_HDFS_PATH below.
+#
+@MODE_HDFSOVERLUSTRE@
+
+@MODE_HDFSOVERNETWORKFS@
+
+# "rawnetworkfs" - Use Hadoop RawLocalFileSystem (i.e. file: scheme),
+#           to use networked file system directly.  It could be a
+#           Lustre mount or NFS mount.  Whatever you please.
+#
+#           User must set HADOOP_RAWNETWORKFS_PATH below.
+#
+@MODE_INTELLUSTRE@
+
+@MODE_MAGPIENETWORKFS@
+
+export HADOOP_FILESYSTEM_MODE="hdfsoverlustre"
+
+# Path for HDFS when using local disk
+#
+# If you want to specify multiple paths (such as multiple drives),
+# make them comma separated (e.g. /dir1,/dir2,/dir3).  The multiple
+# paths will be used for local intermediate data and HDFS.  The first
+# path will also store daemon data, such as namenode or jobtracker
+# data.
+#
+export HADOOP_HDFS_PATH="SSDDIRPREFIX/hdfs"
+
+# HDFS cleanup
+#
+# After your job has completed, if HADOOP_HDFS_PATH_CLEAR is set to
+# yes, Magpie will do a rm -rf on HADOOP_HDFS_PATH.  This may be
+# convenient for cleaning up your job after it has run.  This is
+# particularly useful for HDFS, b/c on your next job run, you may not
+# be able to get the nodes you want on your next run, leading to
+# problems.
+#
+# export HADOOP_HDFS_PATH_CLEAR="yes"
+
+@PATH_HDFSOVERLUSTRE@
+
+@PATH_HDFSOVERNETWORKFS@
+
+# Path for rawnetworkfs
+#
+# This path is used for creating local per-node paths.
+#
+export HADOOP_RAWNETWORKFS_PATH="LUSTREDIRPREFIX/rawnetworkfs/"
+
+@PATH_INTELLUSTRE@
+
+@PATH_MAGPIENETWORKFS@
+
+# If you have a local SSD, performance may be better to store
+# intermediate data on it rather than Lustre or some other networked
+# filesystem.  If the below environment variable is specified, local
+# intermediate data will be stored in the specified directory.
+# Otherwise it will go to an appropriate directory in Lustre/networked
+# FS.
+#
+# Be wary, local SSDs stores may have less space than HDDs or
+# networked file systems.  It can be easy to run out of space.
+#
+# If you want to specify multiple paths (such as multiple drives),
+# make them comma separated (e.g. /dir1,/dir2,/dir3).  The multiple
+# paths will be used for local intermediate data.
+#
+# export HADOOP_LOCALSTORE="SSDDIRPREFIX/localstore/"
+
+# Option to use unique locations per job to store hdfs data
+#
+# If this is set to yes the nodes will append the job id to the
+# current HDFSOVERLUSTRE and HDFSOVERNETWORKFS path thus keeping the
+# hdfs data isolated per job. This enables the same script to be
+# executed multiple times (usually with different data) without the
+# HDFSOVERXXX instances colliding with each other
+#
+# Be careful to cleanup the HDFSOVERXXX directories from time to time,
+# as Magpie will not clear data from prior jobs.
+#
+# export HADOOP_PER_JOB_HDFS_PATH="yes"
+
+# HDFS Block Size
+#
+# Commonly 134217728, 268435456, 536870912 (i.e. 128m, 256m, 512m)
+#
+# If not specified, defaults to 134217728
+#
+# export HADOOP_HDFS_BLOCKSIZE=134217728
+
+# HDFS Replication
+#
+# HDFS commonly uses 3.  When doing HDFS over Lustre/NetworkFS, higher
+# replication can also help with resilience if nodes fail.  You may
+# wish to set this to < 3 to save space.
+#
+# If not specified, defaults to 3
+#
+# export HADOOP_HDFS_REPLICATION=3
+
+# RawNetworkFS Block Size
+#
+# Commonly 33554432, 67108864, 134217728 (i.e. 32m, 64m, 128m)
+#
+# If not specified, defaults to 33554432
+#
+# export HADOOP_RAWNETWORKFS_BLOCKSIZE=33554432
+
+@CONFIG_INTELLUSTRE@
+
+@CONFIG_MAGPIENETWORKFS@
+
+@HDFS_FEDERATION@
+
+
