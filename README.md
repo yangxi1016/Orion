@@ -51,7 +51,7 @@ After the task is submitted, it will automatically queue up, wait for resources,
 https://github.com/yangxi1016/picture/blob/master/orion-readme6.png 
 
 Once the resource is acquired, the Hadoop cluster is automatically configured and started, and the specified task script is executed.
-https://github.com/yangxi1016/picture/blob/master/orion-readme2.png
+(https://github.com/yangxi1016/picture/raw/master/orion-readme2.png)
 
 Next, the output of the execution task script is output.
 After the implementation is complete, the following prompts are given:
