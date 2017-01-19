@@ -19,17 +19,25 @@ In summary, Orion has the following features:
 
 
 Instructions
+
 1. The installation directory
+
 / WORK / app / share / Orion
+
 2. The initial situation in this directory is:
 
 Orion_start.sh which is used for cluster configuration and start. Orion_clean.sh is in the task after the completion of the calculation or the release of resources when an error, clean up the directory. Script directory is used to store task scripts.
 
 Hadoop running configuration
+
 1. Switch to the installation directory
+
 2. Configure and start a Hadoop cluster
+
 To execute the wordcount.sh script directory, for example, the command is:
+
 ./Orion_start.sh -t hadoop -p work -N 6 -s `pwd` / script / wordcount.sh
+
 Where -t is the cluster type (Hadoop or spark), -p is the partition on which the cluster is running, -N is the number of nodes used, -s is the script of the task to run.
 
 After the task is submitted, it will automatically queue up, wait for resources, if you can not wait for resources, the program will determine the exit, and prompts the replacement partition and adjust the number of nodes.
@@ -37,6 +45,7 @@ After the task is submitted, it will automatically queue up, wait for resources,
 Once the resource is acquired, the Hadoop cluster is automatically configured and started, and the specified task script is executed.
 
 Next, the output of the execution task script is output.
+
 After the implementation is complete, the following prompts are given:
 
 3.When processing is complete, release resources
@@ -45,7 +54,9 @@ After the implementation is complete, the following prompts are given:
 In the script directory is given an example wordcount.sh
 
 Where $ {HADOOP_HOME} is the directory where Hadoop is installed. In general, modify the contents of the command can be. You can also specify a different output directory.
+
 5. About the configuration file changes
+
 If you want to modify the configuration file, you can switch to the installation directory under the magpie / conf directory, modify the corresponding file, modify and then take effect when you create a new cluster. You can also manually log in to the master node of the existing cluster and restart YARN and JobHistoryServer as described above.
 
 For Hadoop, generally only need to modify the black display of several XML files. Note that all of these are based on the Lustre file system as a Hadoop, without the use of hdfs. Since Lustre is already globally shared, it is not necessary to introduce hdfs.
