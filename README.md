@@ -18,7 +18,7 @@ In summary, Orion has the following features:
 
  
 
-
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 Instructions
 
 1.The installation directory
@@ -48,17 +48,17 @@ Where -t is the cluster type (Hadoop or spark),
 -s is the script of the task to run.
 
 After the task is submitted, it will automatically queue up, wait for resources, if you can not wait for resources, the program will determine the exit, and prompts the replacement partition and adjust the number of nodes.
- 
+https://github.com/yangxi1016/picture/blob/master/orion-readme6.png?raw=true 
 
 Once the resource is acquired, the Hadoop cluster is automatically configured and started, and the specified task script is executed.
- 
+https://github.com/yangxi1016/picture/blob/master/orion-readme2.png?raw=true
 
 Next, the output of the execution task script is output.
 After the implementation is complete, the following prompts are given:
- 
+https://github.com/yangxi1016/picture/blob/master/orion-readme3.png?raw=true 
 
 3.When processing is complete, release resources
- 
+https://github.com/yangxi1016/picture/blob/master/orion-readme4.png?raw=true 
 
 4.About the task script
 
@@ -68,8 +68,9 @@ In the script directory is given an example wordcount.sh
 Where $ {HADOOP_HOME} is the directory where Hadoop is installed. In general, modify the contents of the command can be. You can also specify a different output directory.
 
 5.About the configuration file changes
+https://github.com/yangxi1016/picture/blob/master/orion-readme5.png?raw=true
 
 If you want to modify the configuration file, you can switch to the installation directory under the magpie / conf directory, modify the corresponding file, modify and then take effect when you create a new cluster. You can also manually log in to the master node of the existing cluster and restart YARN and JobHistoryServer as described above.
- 
+https://github.com/yangxi1016/picture/blob/master/orion-readme6.png?raw=true 
 
 For Hadoop, generally only need to modify the black display of several XML files. Note that all of these are based on the Lustre file system as a Hadoop, without the use of hdfs. Since Lustre is already globally shared, it is not necessary to introduce hdfs.
